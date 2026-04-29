@@ -76,6 +76,7 @@ const randomizeButton = document.querySelector("#randomizeButton");
 const sampleButton = document.querySelector("#sampleButton");
 const clearButton = document.querySelector("#clearButton");
 const uniqueChampionToggle = document.querySelector("#uniqueChampionToggle");
+const animationToggle = document.querySelector("#animationToggle");
 const speedRange = document.querySelector("#speedRange");
 const speedLabel = document.querySelector("#speedLabel");
 const statusLabel = document.querySelector("#statusLabel");
@@ -759,6 +760,307 @@ function animationDuration() {
   return [650, 1100, 1550][Number(speedRange.value)];
 }
 
+function revealStepDuration() {
+  return [420, 660, 880][Number(speedRange.value)];
+}
+
+function revealPauseDuration() {
+  return [120, 180, 240][Number(speedRange.value)];
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function sleepWithCancel(ms, shouldCancel) {
+  return new Promise((resolve) => {
+    const start = window.performance.now();
+
+    const tick = () => {
+      if (shouldCancel()) {
+        resolve(false);
+        return;
+      }
+
+      const elapsed = window.performance.now() - start;
+      if (elapsed >= ms) {
+        resolve(true);
+        return;
+      }
+
+      window.setTimeout(tick, Math.min(48, ms - elapsed));
+    };
+
+    tick();
+  });
+}
+
+function assignmentFrom(source, teamKey, laneKey) {
+  return source?.[teamKey]?.find((entry) => entry.lane === laneKey);
+}
+
+function createDraftOverlay() {
+  let overlay = document.querySelector("#draftAnimationOverlay");
+  if (overlay) return overlay;
+
+  overlay = document.createElement("section");
+  overlay.id = "draftAnimationOverlay";
+  overlay.className = "draft-animation-overlay";
+  overlay.setAttribute("aria-hidden", "true");
+  overlay.setAttribute("aria-live", "polite");
+  document.body.append(overlay);
+  return overlay;
+}
+
+function renderDraftOverlay(assignmentsSource) {
+  const overlay = createDraftOverlay();
+  overlay.innerHTML = `
+    <div class="draft-animation-panel">
+      <div class="draft-animation-heading">
+        <p class="eyebrow">랜덤 배정</p>
+        <h2>라인별 결과 확정</h2>
+      </div>
+      <div class="draft-animation-list">
+        ${lanes
+          .map((lane) => {
+            const blueRow = assignmentFrom(assignmentsSource, "blue", lane.key);
+            const redRow = assignmentFrom(assignmentsSource, "red", lane.key);
+            return `
+              <div class="draft-animation-row" data-lane="${lane.key}">
+                ${draftOverlaySlotMarkup("blue", lane, blueRow)}
+                <div class="draft-animation-lane">${lane.label}</div>
+                ${draftOverlaySlotMarkup("red", lane, redRow)}
+                <div class="draft-animation-action">
+                  <button class="draft-animation-run-button" type="button" data-lane="${lane.key}">배정</button>
+                </div>
+              </div>
+            `;
+          })
+          .join("")}
+      </div>
+      <div class="draft-animation-footer">
+        <button class="draft-animation-cancel-button" type="button">중지</button>
+        <button class="draft-animation-done-button" type="button" disabled aria-disabled="true" aria-hidden="true">
+          완료
+        </button>
+      </div>
+    </div>
+  `;
+  return overlay;
+}
+
+function draftOverlaySlotMarkup(teamKey, lane, row) {
+  const team = teams.find((item) => item.key === teamKey);
+  return `
+    <article class="draft-animation-slot ${teamKey}" data-team="${teamKey}" data-lane="${lane.key}">
+      <span class="draft-animation-avatar">
+        <span class="placeholder-avatar">대기</span>
+      </span>
+      <span class="draft-animation-copy">
+        <span class="draft-animation-team">${team.label}</span>
+        <strong class="draft-animation-player">대기 중</strong>
+        <span class="draft-animation-champion">${row ? "결정 대기" : "배정 전"}</span>
+      </span>
+    </article>
+  `;
+}
+
+function updateDraftOverlaySlot(slot, row) {
+  const avatar = slot.querySelector(".draft-animation-avatar");
+  const player = slot.querySelector(".draft-animation-player");
+  const champion = slot.querySelector(".draft-animation-champion");
+  avatar.innerHTML = `<img src="${row.champion.image}" alt="${escapeHtml(row.champion.name)}" />`;
+  player.textContent = row.player;
+  champion.textContent = row.champion.name;
+}
+
+async function playDraftOverlaySlot(slot, finalRow, laneKey, shouldCancel) {
+  if (!slot || !finalRow || shouldCancel()) return false;
+
+  slot.classList.add("is-active");
+  const previewInterval = window.setInterval(() => {
+    if (shouldCancel()) {
+      window.clearInterval(previewInterval);
+      return;
+    }
+
+    updateDraftOverlaySlot(slot, {
+      player: pickRandom(getPlayers()),
+      champion: pickRandom(selectedChampionsForLane(laneKey))
+    });
+  }, 82);
+
+  try {
+    const completedShuffle = await sleepWithCancel(revealStepDuration(), shouldCancel);
+    if (!completedShuffle || shouldCancel()) return false;
+
+    updateDraftOverlaySlot(slot, finalRow);
+    slot.classList.add("is-final");
+
+    return sleepWithCancel(revealPauseDuration(), shouldCancel);
+  } finally {
+    window.clearInterval(previewInterval);
+    slot.classList.remove("is-active");
+  }
+}
+
+async function playDraftRevealAnimation(assignmentsSource) {
+  const overlay = renderDraftOverlay(assignmentsSource);
+  document.documentElement.classList.add("has-draft-overlay-root");
+  document.body.classList.add("has-draft-overlay");
+  overlay.setAttribute("aria-hidden", "false");
+  overlay.classList.add("is-visible");
+  await sleep(160);
+  statusLabel.textContent = "라인별 배정 버튼을 눌러 결과를 확정하세요.";
+
+  return new Promise((resolve, reject) => {
+    const completedLaneKeys = new Set();
+    let isLaneRunning = false;
+    let isCancelled = false;
+    let isSettled = false;
+    const doneButton = overlay.querySelector(".draft-animation-done-button");
+    const cancelButton = overlay.querySelector(".draft-animation-cancel-button");
+
+    const shouldCancel = () => isCancelled;
+
+    const settle = (isCompleted) => {
+      if (isSettled) return;
+      isSettled = true;
+      resolve(isCompleted);
+    };
+
+    const setDoneButtonEnabled = (enabled) => {
+      doneButton.disabled = !enabled;
+      doneButton.setAttribute("aria-disabled", String(!enabled));
+      doneButton.setAttribute("aria-hidden", String(!enabled));
+      doneButton.classList.toggle("is-visible", enabled);
+    };
+
+    const setLaneButtonsDisabled = (disabled) => {
+      overlay.querySelectorAll(".draft-animation-run-button").forEach((button) => {
+        if (completedLaneKeys.has(button.dataset.lane)) return;
+        button.disabled = disabled;
+      });
+    };
+
+    const cancelDraft = () => {
+      if (isSettled || isCancelled) return;
+      isCancelled = true;
+      setLaneButtonsDisabled(true);
+      setDoneButtonEnabled(false);
+      cancelButton.disabled = true;
+      overlay.classList.remove("is-complete");
+      statusLabel.textContent = "배정을 중지했습니다.";
+      hideDraftOverlay();
+      window.setTimeout(() => settle(false), 240);
+    };
+
+    const revealLane = async (button) => {
+      if (isCancelled || isLaneRunning || completedLaneKeys.has(button.dataset.lane)) return;
+
+      const lane = getLane(button.dataset.lane);
+      const row = overlay.querySelector(`.draft-animation-row[data-lane="${lane.key}"]`);
+      const blueSlot = row.querySelector('.draft-animation-slot[data-team="blue"]');
+      const redSlot = row.querySelector('.draft-animation-slot[data-team="red"]');
+
+      isLaneRunning = true;
+      button.disabled = true;
+      button.textContent = "배정 중";
+      setLaneButtonsDisabled(true);
+
+      try {
+        row.classList.add("is-active-lane");
+        statusLabel.textContent = `블루팀 ${lane.label} 결과를 확정하고 있습니다.`;
+        const blueCompleted = await playDraftOverlaySlot(
+          blueSlot,
+          assignmentFrom(assignmentsSource, "blue", lane.key),
+          lane.key,
+          shouldCancel
+        );
+        if (!blueCompleted || isCancelled) return;
+
+        statusLabel.textContent = `레드팀 ${lane.label} 결과를 확정하고 있습니다.`;
+        const redCompleted = await playDraftOverlaySlot(
+          redSlot,
+          assignmentFrom(assignmentsSource, "red", lane.key),
+          lane.key,
+          shouldCancel
+        );
+        if (!redCompleted || isCancelled) return;
+
+        row.classList.add("is-emphasized");
+        statusLabel.textContent = `${lane.label} 배정이 확정되었습니다.`;
+        const emphasizedCompleted = await sleepWithCancel(revealPauseDuration() + 520, shouldCancel);
+        if (!emphasizedCompleted || isCancelled) return;
+
+        row.classList.remove("is-active-lane", "is-emphasized");
+        row.classList.add("is-complete");
+        completedLaneKeys.add(lane.key);
+        button.textContent = "완료";
+        button.classList.add("is-complete");
+
+        if (completedLaneKeys.size === lanes.length) {
+          overlay.classList.add("is-complete");
+          setDoneButtonEnabled(true);
+          statusLabel.textContent = "모든 라인 배정이 완료되었습니다. 완료 버튼을 눌러 결과를 확인하세요.";
+        } else {
+          setLaneButtonsDisabled(false);
+        }
+      } catch (error) {
+        reject(error);
+      } finally {
+        isLaneRunning = false;
+        if (!isCancelled && completedLaneKeys.size !== lanes.length) {
+          setLaneButtonsDisabled(false);
+        }
+      }
+    };
+
+    overlay.onclick = (event) => {
+      const cancelTarget = event.target.closest(".draft-animation-cancel-button");
+      if (cancelTarget) {
+        cancelDraft();
+        return;
+      }
+
+      const laneButton = event.target.closest(".draft-animation-run-button");
+      if (laneButton) {
+        revealLane(laneButton);
+        return;
+      }
+
+      const finishButton = event.target.closest(".draft-animation-done-button");
+      if (
+        !finishButton ||
+        finishButton.disabled ||
+        completedLaneKeys.size !== lanes.length ||
+        isLaneRunning ||
+        isCancelled
+      ) {
+        return;
+      }
+
+      finishButton.disabled = true;
+      finishButton.setAttribute("aria-disabled", "true");
+      cancelButton.disabled = true;
+      statusLabel.textContent = "최종 결과를 팀 배정 보드에 반영합니다.";
+      hideDraftOverlay();
+      window.setTimeout(() => settle(true), 240);
+    };
+  });
+}
+
+function hideDraftOverlay() {
+  const overlay = document.querySelector("#draftAnimationOverlay");
+  if (!overlay) return;
+  overlay.classList.remove("is-visible", "is-complete");
+  overlay.setAttribute("aria-hidden", "true");
+  document.documentElement.classList.remove("has-draft-overlay-root");
+  document.body.classList.remove("has-draft-overlay");
+}
+
 function randomizeDraft() {
   const players = getPlayers();
   if (players.length !== 10) {
@@ -773,6 +1075,45 @@ function randomizeDraft() {
     activeLockCount > 0
       ? `배정 중입니다. 사전 지정과 고정 슬롯 ${activeLockCount}개를 반영합니다.`
       : "배정 중입니다. 팀과 라인을 섞고 있습니다.";
+
+  if (animationToggle?.checked) {
+    closePresetMenus();
+
+    (async () => {
+      let nextAssignments = null;
+      try {
+        nextAssignments = createAssignments();
+        const completed = await playDraftRevealAnimation(nextAssignments);
+        if (!completed) {
+          statusLabel.textContent = "배정을 중지했습니다. 기존 화면으로 돌아왔습니다.";
+          return;
+        }
+
+        assignments = nextAssignments;
+        clearPresetPlayers();
+        renderAssignments(true);
+        pushHistory();
+        statusLabel.textContent =
+          activeLockCount > 0
+            ? "배정 완료. 사전 지정과 고정 옵션을 반영했습니다."
+            : "배정 완료. 결과 카드를 클릭하면 챔피언만 다시 뽑습니다.";
+      } catch (error) {
+        console.error(error);
+        if (nextAssignments) {
+          assignments = nextAssignments;
+          clearPresetPlayers();
+          renderAssignments(true);
+          pushHistory();
+        }
+        statusLabel.textContent = "배정은 완료했지만 연출 표시 중 문제가 발생했습니다.";
+      } finally {
+        hideDraftOverlay();
+        document.body.classList.remove("is-randomizing");
+        randomizeButton.disabled = false;
+      }
+    })();
+    return;
+  }
 
   const duration = animationDuration();
   const previewInterval = window.setInterval(randomPreview, 95);
