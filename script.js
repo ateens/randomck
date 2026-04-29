@@ -54,6 +54,13 @@ const teams = [
   { key: "red", label: "레드팀" }
 ];
 
+const presetPlayersBySlot = Object.fromEntries(
+  teams.flatMap((team) => lanes.map((lane) => [`${team.key}:${lane.key}`, ""]))
+);
+const presetChampionsBySlot = Object.fromEntries(
+  teams.flatMap((team) => lanes.map((lane) => [`${team.key}:${lane.key}`, ""]))
+);
+
 let assignments = null;
 let activeLaneKey = lanes[0].key;
 let history = [];
@@ -87,8 +94,24 @@ function championObject(champion) {
   return { ...champion, image: championImage(champion.id) };
 }
 
+function defaultLocks() {
+  return { all: false, position: false };
+}
+
 function getLane(key) {
   return lanes.find((lane) => lane.key === key);
+}
+
+function slotKey(teamKey, laneKey) {
+  return `${teamKey}:${laneKey}`;
+}
+
+function isFullLocked(row) {
+  return Boolean(row?.locks?.all);
+}
+
+function isPositionLocked(row) {
+  return Boolean(row?.locks?.all || row?.locks?.position);
 }
 
 function setsEqual(first, second) {
@@ -190,8 +213,10 @@ function createPlayerInputs() {
 
 function handlePlayerInputChange() {
   syncSelectedPlayersFromInputs();
+  syncPresetPlayersWithInputs();
   updateFilledCount();
   renderPlayerPool();
+  if (!assignments) renderEmptyBoard();
 }
 
 function updateFilledCount() {
@@ -239,8 +264,10 @@ function fillPlayers(names) {
     input.value = names[index] || "";
   });
   syncSelectedPlayersFromInputs();
+  syncPresetPlayersWithInputs();
   updateFilledCount();
   renderPlayerPool();
+  if (!assignments) renderEmptyBoard();
 }
 
 function addPlayerToInput(name) {
@@ -277,8 +304,10 @@ function togglePlayerFromPool(name) {
     statusLabel.textContent = "참가자 10명이 모두 채워져 있습니다. 한 칸을 비운 뒤 선택하세요.";
   }
 
+  syncPresetPlayersWithInputs();
   updateFilledCount();
   renderPlayerPool();
+  if (!assignments) renderEmptyBoard();
 }
 
 function addNewPlayerName() {
@@ -298,11 +327,157 @@ function addNewPlayerName() {
   }
 
   newPlayerInput.value = "";
+  syncPresetPlayersWithInputs();
   updateFilledCount();
   renderPlayerPool();
+  if (!assignments) renderEmptyBoard();
+}
+
+function clearPresetPlayers() {
+  Object.keys(presetPlayersBySlot).forEach((key) => {
+    presetPlayersBySlot[key] = "";
+  });
+  Object.keys(presetChampionsBySlot).forEach((key) => {
+    presetChampionsBySlot[key] = "";
+  });
+}
+
+function syncPresetPlayersWithInputs() {
+  const players = new Set(getPlayers());
+  Object.keys(presetPlayersBySlot).forEach((key) => {
+    if (presetPlayersBySlot[key] && !players.has(presetPlayersBySlot[key])) {
+      presetPlayersBySlot[key] = "";
+    }
+  });
+}
+
+function playerOptionButtonMarkup(selectedPlayer = "") {
+  const options = [
+    `<button class="preset-option ${selectedPlayer ? "" : "is-selected"}" type="button" data-player-name="" role="option" aria-selected="${selectedPlayer ? "false" : "true"}">선택 안 함</button>`
+  ];
+  getPlayers().forEach((player) => {
+    options.push(
+      `<button class="preset-option ${player === selectedPlayer ? "is-selected" : ""}" type="button" data-player-name="${escapeHtml(player)}" role="option" aria-selected="${player === selectedPlayer ? "true" : "false"}">${escapeHtml(player)}</button>`
+    );
+  });
+  return options.join("");
+}
+
+function presetChampionForSlot(teamKey, laneKey) {
+  const championId = presetChampionsBySlot[slotKey(teamKey, laneKey)];
+  const champion = championById.get(championId);
+  return champion ? championObject(champion) : null;
+}
+
+function championIdSetForLaneOptions(laneKey) {
+  return new Set(selectedChampionsForLane(laneKey).map((champion) => champion.id));
+}
+
+function syncPresetChampionsWithPools(targetLaneKey = "") {
+  teams.forEach((team) => {
+    lanes.forEach((lane) => {
+      if (targetLaneKey && lane.key !== targetLaneKey) return;
+      const key = slotKey(team.key, lane.key);
+      const championId = presetChampionsBySlot[key];
+      if (championId && !championIdSetForLaneOptions(lane.key).has(championId)) {
+        presetChampionsBySlot[key] = "";
+      }
+    });
+  });
+}
+
+function championOptionButtonMarkup(laneKey, selectedChampionId = "") {
+  const selectedChampion = championById.get(selectedChampionId);
+  const laneChampions = selectedChampionsForLane(laneKey)
+    .sort(compareChampionsByName)
+    .filter((champion) => champion.id !== selectedChampionId);
+  const champions = selectedChampion
+    ? [championObject(selectedChampion), ...laneChampions]
+    : laneChampions;
+  const options = [
+    `<button class="preset-option ${selectedChampionId ? "" : "is-selected"}" type="button" data-champion-id="" role="option" aria-selected="${selectedChampionId ? "false" : "true"}">선택 안 함</button>`
+  ];
+
+  champions.forEach((champion) => {
+    options.push(
+      `<button class="preset-option champion-preset-option ${champion.id === selectedChampionId ? "is-selected" : ""}" type="button" data-champion-id="${champion.id}" role="option" aria-selected="${champion.id === selectedChampionId ? "true" : "false"}">
+        <img class="preset-option-avatar" src="${champion.image}" alt="" loading="lazy" />
+        <span>${escapeHtml(champion.name)}</span>
+      </button>`
+    );
+  });
+
+  return options.join("");
+}
+
+function closePresetMenus(exceptPicker = null) {
+  teamBoard.querySelectorAll(".preset-picker.is-open").forEach((picker) => {
+    if (picker === exceptPicker) return;
+    picker.classList.remove("is-open");
+    picker.closest(".assignment-card")?.classList.remove("has-open-preset");
+    picker.querySelector(".preset-trigger")?.setAttribute("aria-expanded", "false");
+  });
+}
+
+function togglePresetMenu(trigger) {
+  const picker = trigger.closest(".preset-picker");
+  if (!picker) return;
+  const willOpen = !picker.classList.contains("is-open");
+
+  closePresetMenus(willOpen ? picker : null);
+  picker.classList.toggle("is-open", willOpen);
+  picker.closest(".assignment-card")?.classList.toggle("has-open-preset", willOpen);
+  trigger.setAttribute("aria-expanded", String(willOpen));
+}
+
+function setPresetPlayer(teamKey, laneKey, playerName) {
+  const normalizedPlayer = normalizeName(playerName);
+  const key = slotKey(teamKey, laneKey);
+
+  if (normalizedPlayer && !getPlayers().includes(normalizedPlayer)) return;
+
+  Object.keys(presetPlayersBySlot).forEach((slot) => {
+    if (slot !== key && presetPlayersBySlot[slot] === normalizedPlayer) {
+      presetPlayersBySlot[slot] = "";
+    }
+  });
+
+  presetPlayersBySlot[key] = normalizedPlayer;
+  renderEmptyBoard();
+
+  const lane = getLane(laneKey);
+  statusLabel.textContent = normalizedPlayer
+    ? `${teamLabel(teamKey)} ${lane.label}에 ${normalizedPlayer}을 먼저 배정했습니다.`
+    : `${teamLabel(teamKey)} ${lane.label} 사전 배정을 해제했습니다.`;
+}
+
+function setPresetChampion(teamKey, laneKey, championId) {
+  const key = slotKey(teamKey, laneKey);
+  const champion = championById.get(championId);
+
+  if (championId && !champion) return;
+
+  if (championId && uniqueChampionToggle.checked) {
+    Object.keys(presetChampionsBySlot).forEach((slot) => {
+      if (slot !== key && presetChampionsBySlot[slot] === championId) {
+        presetChampionsBySlot[slot] = "";
+      }
+    });
+  }
+
+  presetChampionsBySlot[key] = championId;
+  renderEmptyBoard();
+
+  const lane = getLane(laneKey);
+  statusLabel.textContent = champion
+    ? `${teamLabel(teamKey)} ${lane.label}에 ${champion.name}을 먼저 배정했습니다.`
+    : `${teamLabel(teamKey)} ${lane.label} 챔피언 사전 배정을 해제했습니다.`;
 }
 
 function renderEmptyBoard() {
+  syncPresetChampionsWithPools();
+  teamBoard.classList.add("is-preset-mode");
+
   const renderTeamColumn = (team) => `
       <article class="team-column ${team.key}" data-team="${team.key}">
         <div class="team-title">
@@ -310,20 +485,54 @@ function renderEmptyBoard() {
         </div>
         <div class="role-list">
           ${lanes
-            .map(
-              (lane) => `
-              <button class="assignment-card" type="button" data-team="${team.key}" data-lane="${lane.key}" data-lane-label="${lane.label}">
+            .map((lane) => {
+              const key = slotKey(team.key, lane.key);
+              const selectedPlayer = presetPlayersBySlot[key] || "";
+              const selectedChampion = presetChampionForSlot(team.key, lane.key);
+              const lockClasses = [
+                selectedPlayer || selectedChampion ? "has-lock" : "",
+                selectedPlayer ? "is-locked-position" : "",
+                selectedChampion ? "is-locked-champion" : "",
+                selectedPlayer && selectedChampion ? "is-locked-all" : ""
+              ]
+                .filter(Boolean)
+                .join(" ");
+              return `
+              <article class="assignment-card is-empty ${lockClasses}" data-team="${team.key}" data-lane="${lane.key}" data-lane-label="${lane.label}">
                 <span class="champion-avatar">
-                  <span class="placeholder-avatar">대기</span>
+                  ${
+                    selectedChampion
+                      ? `<img src="${selectedChampion.image}" alt="${selectedChampion.name}" loading="lazy" />`
+                      : `<span class="placeholder-avatar">대기</span>`
+                  }
                 </span>
                 <span class="assignment-main">
-                  <span class="player-name">대기 중</span>
-                  <span class="champion-name">배정 전</span>
+                  <span class="player-name">${selectedPlayer || "대기 중"}</span>
+                  <span class="champion-name">${selectedChampion ? selectedChampion.name : "배정 전"}</span>
+                  <span class="preset-stack">
+                  <span class="preset-picker" data-preset-type="player" data-team="${team.key}" data-lane="${lane.key}">
+                    <button class="preset-trigger ${selectedPlayer ? "has-selection" : ""}" type="button" aria-expanded="false" aria-haspopup="listbox">
+                      <span>${selectedPlayer ? `${escapeHtml(selectedPlayer)} 고정` : "플레이어 선택"}</span>
+                      <span class="preset-chevron" aria-hidden="true">⌄</span>
+                    </button>
+                    <span class="preset-menu" role="listbox" aria-label="${team.label} ${lane.label} 사전 배정">
+                      ${playerOptionButtonMarkup(selectedPlayer)}
+                    </span>
+                  </span>
+                  <span class="preset-picker champion-preset-picker" data-preset-type="champion" data-team="${team.key}" data-lane="${lane.key}">
+                    <button class="preset-trigger ${selectedChampion ? "has-selection" : ""}" type="button" aria-expanded="false" aria-haspopup="listbox">
+                      <span>${selectedChampion ? `${escapeHtml(selectedChampion.name)} 고정` : "챔피언 선택"}</span>
+                      <span class="preset-chevron" aria-hidden="true">⌄</span>
+                    </button>
+                    <span class="preset-menu" role="listbox" aria-label="${team.label} ${lane.label} 챔피언 사전 배정">
+                      ${championOptionButtonMarkup(lane.key, selectedChampion?.id || "")}
+                    </span>
+                  </span>
+                  </span>
                 </span>
-                <span class="reroll-hint" aria-hidden="true">↻</span>
-              </button>
-            `
-            )
+              </article>
+            `;
+            })
             .join("")}
         </div>
       </article>
@@ -336,21 +545,110 @@ function renderEmptyBoard() {
   `;
 }
 
+function getAssignment(teamKey, laneKey) {
+  return assignments?.[teamKey]?.find((entry) => entry.lane === laneKey);
+}
+
+function lockedCount() {
+  const lockedSlots = new Set(
+    Object.entries(presetPlayersBySlot)
+      .filter(([, player]) => Boolean(player))
+      .map(([key]) => key)
+  );
+
+  Object.entries(presetChampionsBySlot)
+    .filter(([, championId]) => Boolean(championId))
+    .forEach(([key]) => lockedSlots.add(key));
+
+  if (assignments) {
+    Object.entries(assignments).forEach(([teamKey, rows]) => {
+      rows.forEach((row) => {
+        if (isFullLocked(row) || row.locks?.position) {
+          lockedSlots.add(slotKey(teamKey, row.lane));
+        }
+      });
+    });
+  }
+
+  return lockedSlots.size;
+}
+
 function createAssignments() {
-  const shuffledPlayers = shuffle(getPlayers());
-  const usedChampions = new Set();
+  const players = getPlayers();
+  const fixedPlayersBySlot = new Map();
+  const usedFixedPlayers = new Set();
+
+  teams.forEach((team) => {
+    lanes.forEach((lane) => {
+      const key = slotKey(team.key, lane.key);
+      const previousRow = getAssignment(team.key, lane.key);
+      const presetPlayer = presetPlayersBySlot[key];
+      const fixedPlayer =
+        presetPlayer && players.includes(presetPlayer)
+          ? presetPlayer
+          : isPositionLocked(previousRow) && players.includes(previousRow.player)
+            ? previousRow.player
+            : "";
+
+      if (fixedPlayer && !usedFixedPlayers.has(fixedPlayer)) {
+        fixedPlayersBySlot.set(key, fixedPlayer);
+        usedFixedPlayers.add(fixedPlayer);
+      }
+    });
+  });
+
+  const availablePlayers = shuffle(players.filter((player) => !usedFixedPlayers.has(player)));
+  const usedChampions = new Set(
+    assignments
+      ? Object.values(assignments)
+          .flat()
+          .filter((row) => isFullLocked(row) && row.champion && players.includes(row.player))
+          .map((row) => row.champion.id)
+      : []
+  );
+
+  if (uniqueChampionToggle.checked) {
+    Object.values(presetChampionsBySlot).forEach((championId) => {
+      if (championId) usedChampions.add(championId);
+    });
+  }
+
   const nextAssignments = {
     blue: [],
     red: []
   };
 
-  teams.forEach((team, teamIndex) => {
-    const teamPlayers = shuffle(shuffledPlayers.slice(teamIndex * 5, teamIndex * 5 + 5));
-    lanes.forEach((lane, laneIndex) => {
+  teams.forEach((team) => {
+    lanes.forEach((lane) => {
+      const key = slotKey(team.key, lane.key);
+      const previousRow = getAssignment(team.key, lane.key);
+      const locks = { ...defaultLocks(), ...(previousRow?.locks || {}) };
+      const hasPresetPlayer = Boolean(presetPlayersBySlot[key] && players.includes(presetPlayersBySlot[key]));
+      const presetChampion = presetChampionForSlot(team.key, lane.key);
+      const hasPresetChampion = Boolean(presetChampion);
+
+      if (hasPresetPlayer && hasPresetChampion) {
+        locks.all = true;
+        locks.position = false;
+      } else {
+        locks.position = Boolean(locks.position || hasPresetPlayer);
+        if (locks.all) locks.position = false;
+      }
+
+      const keepChampion = Boolean(locks.all && previousRow?.champion && players.includes(previousRow.player));
+      const champion = presetChampion || (
+        keepChampion
+          ? previousRow.champion
+          : drawChampion(lane.key, usedChampions, previousRow?.champion?.id)
+      );
+
+      if (presetChampion) usedChampions.add(presetChampion.id);
+
       nextAssignments[team.key].push({
         lane: lane.key,
-        player: teamPlayers[laneIndex],
-        champion: drawChampion(lane.key, usedChampions)
+        player: fixedPlayersBySlot.get(key) || availablePlayers.shift(),
+        champion,
+        locks
       });
     });
   });
@@ -368,6 +666,8 @@ function drawChampion(laneKey, usedChampions = new Set(), currentId = "") {
 }
 
 function renderAssignments(animated = true) {
+  teamBoard.classList.remove("is-preset-mode");
+
   const renderTeamColumn = (team) => {
       const rows = assignments[team.key] || [];
       return `
@@ -379,9 +679,10 @@ function renderAssignments(animated = true) {
             ${rows
               .map((row, index) => {
                 const lane = getLane(row.lane);
+                const locks = { ...defaultLocks(), ...(row.locks || {}) };
                 const delay = animated ? `style="animation-delay: ${index * 70}ms"` : "";
                 return `
-                  <button class="assignment-card ${animated ? "is-dealing" : ""}" ${delay} type="button" data-team="${team.key}" data-lane="${row.lane}" data-lane-label="${lane.label}" aria-label="${team.label} ${lane.label} 챔피언 다시 뽑기">
+                  <article class="assignment-card ${animated ? "is-dealing" : ""} ${locks.position || locks.all ? "has-lock" : ""} ${locks.position ? "is-locked-position" : ""} ${locks.all ? "is-locked-all" : ""}" ${delay} role="button" tabindex="0" data-team="${team.key}" data-lane="${row.lane}" data-lane-label="${lane.label}" aria-label="${team.label} ${lane.label} 챔피언 다시 뽑기">
                     <span class="champion-avatar">
                       <img src="${row.champion.image}" alt="${row.champion.name}" loading="lazy" />
                     </span>
@@ -389,8 +690,12 @@ function renderAssignments(animated = true) {
                       <span class="player-name">${row.player}</span>
                       <span class="champion-name">${row.champion.name}</span>
                     </span>
+                    <span class="lock-controls" aria-label="고정 옵션">
+                      <button class="lock-button ${locks.all ? "is-active" : ""}" type="button" data-lock-type="all" aria-pressed="${locks.all}" aria-label="${team.label} ${lane.label} 전체 ${locks.all ? "고정 해제" : "고정"}">전체 고정</button>
+                      <button class="lock-button ${locks.position ? "is-active" : ""}" type="button" data-lock-type="position" aria-pressed="${locks.position}" aria-label="${team.label} ${lane.label} 포지션 ${locks.position ? "고정 해제" : "고정"}">포지션 고정</button>
+                    </span>
                     <span class="reroll-hint" aria-hidden="true">↻</span>
-                  </button>
+                  </article>
                 `;
               })
               .join("")}
@@ -424,11 +729,29 @@ function renderLaneCenterColumn(animated = false) {
 
 function randomPreview() {
   teamBoard.querySelectorAll(".assignment-card").forEach((card, index) => {
+    const row = getAssignment(card.dataset.team, card.dataset.lane);
     const lane = getLane(card.dataset.lane) || lanes[index % lanes.length];
-    const champion = pickRandom(selectedChampionsForLane(lane.key));
-    card.querySelector(".champion-avatar").innerHTML = `<img src="${champion.image}" alt="${champion.name}" />`;
-    card.querySelector(".champion-name").textContent = champion.name;
-    card.querySelector(".player-name").textContent = pickRandom(getPlayers());
+    const presetPlayer = presetPlayersBySlot[slotKey(card.dataset.team, card.dataset.lane)];
+    const hasPresetPlayer = Boolean(presetPlayer && getPlayers().includes(presetPlayer));
+    const presetChampion = presetChampionForSlot(card.dataset.team, card.dataset.lane);
+    const fullLocked = isFullLocked(row);
+    const positionLocked = isPositionLocked(row) || hasPresetPlayer;
+    const avatar = card.querySelector(".champion-avatar");
+    const championName = card.querySelector(".champion-name");
+    const playerName = card.querySelector(".player-name");
+
+    if (presetChampion && avatar && championName) {
+      avatar.innerHTML = `<img src="${presetChampion.image}" alt="${presetChampion.name}" />`;
+      championName.textContent = presetChampion.name;
+    } else if (!fullLocked && avatar && championName) {
+      const champion = pickRandom(selectedChampionsForLane(lane.key));
+      avatar.innerHTML = `<img src="${champion.image}" alt="${champion.name}" />`;
+      championName.textContent = champion.name;
+    }
+
+    if (!positionLocked && playerName) {
+      playerName.textContent = pickRandom(getPlayers());
+    }
   });
 }
 
@@ -445,7 +768,11 @@ function randomizeDraft() {
 
   randomizeButton.disabled = true;
   document.body.classList.add("is-randomizing");
-  statusLabel.textContent = "배정 중입니다. 팀과 라인을 섞고 있습니다.";
+  const activeLockCount = lockedCount();
+  statusLabel.textContent =
+    activeLockCount > 0
+      ? `배정 중입니다. 사전 지정과 고정 슬롯 ${activeLockCount}개를 반영합니다.`
+      : "배정 중입니다. 팀과 라인을 섞고 있습니다.";
 
   const duration = animationDuration();
   const previewInterval = window.setInterval(randomPreview, 95);
@@ -453,9 +780,13 @@ function randomizeDraft() {
   window.setTimeout(() => {
     window.clearInterval(previewInterval);
     assignments = createAssignments();
+    clearPresetPlayers();
     renderAssignments(true);
     pushHistory();
-    statusLabel.textContent = "배정 완료. 결과 카드를 클릭하면 챔피언만 다시 뽑습니다.";
+    statusLabel.textContent =
+      activeLockCount > 0
+        ? "배정 완료. 사전 지정과 고정 옵션을 반영했습니다."
+        : "배정 완료. 결과 카드를 클릭하면 챔피언만 다시 뽑습니다.";
     document.body.classList.remove("is-randomizing");
     randomizeButton.disabled = false;
   }, duration);
@@ -465,6 +796,10 @@ function rerollCard(teamKey, laneKey) {
   if (!assignments) return;
   const row = assignments[teamKey].find((entry) => entry.lane === laneKey);
   if (!row) return;
+  if (isFullLocked(row)) {
+    statusLabel.textContent = `${teamLabel(teamKey)} ${getLane(laneKey).label} 전체 고정을 해제한 뒤 다시 뽑을 수 있습니다.`;
+    return;
+  }
 
   const usedChampions = new Set(
     Object.values(assignments)
@@ -484,6 +819,27 @@ function rerollCard(teamKey, laneKey) {
     statusLabel.textContent = `${teamLabel(teamKey)} ${getLane(laneKey).label} 챔피언을 다시 뽑았습니다.`;
   }, 250);
   window.setTimeout(() => card.classList.remove("is-rerolling"), 590);
+}
+
+function toggleAssignmentLock(teamKey, laneKey, lockType) {
+  const row = getAssignment(teamKey, laneKey);
+  if (!row) return;
+
+  row.locks = { ...defaultLocks(), ...(row.locks || {}) };
+  if (lockType === "all") {
+    row.locks.all = !row.locks.all;
+    if (row.locks.all) row.locks.position = false;
+  } else {
+    const nextPositionLock = row.locks.all || !row.locks.position;
+    row.locks.all = false;
+    row.locks.position = nextPositionLock;
+  }
+  renderAssignments(false);
+
+  const lockLabel = lockType === "all" ? "전체" : "포지션";
+  const objectParticle = lockType === "all" ? "를" : "을";
+  const stateLabel = row.locks[lockType] ? "고정했습니다" : "고정을 해제했습니다";
+  statusLabel.textContent = `${teamLabel(teamKey)} ${getLane(laneKey).label} ${lockLabel}${objectParticle} ${stateLabel}.`;
 }
 
 function teamLabel(teamKey) {
@@ -605,6 +961,8 @@ function toggleChampionForActiveLane(championId) {
 
   const isSelected = selectedIds.has(championId);
   syncChampionPool();
+  syncPresetChampionsWithPools(activeLaneKey);
+  if (!assignments) renderEmptyBoard();
   statusLabel.textContent = `${getLane(activeLaneKey).label} 후보에서 ${champion.name}을 ${isSelected ? "활성화" : "비활성화"}했습니다.`;
 }
 
@@ -612,6 +970,8 @@ function restoreActiveLanePool() {
   const lane = getLane(activeLaneKey);
   selectedChampionIdsByLane[activeLaneKey] = new Set(defaultLaneChampionIds[activeLaneKey] || []);
   syncChampionPool();
+  syncPresetChampionsWithPools(activeLaneKey);
+  if (!assignments) renderEmptyBoard();
   statusLabel.textContent = `${lane.label} 후보를 LOL.PS 기본값으로 되돌렸습니다.`;
 }
 
@@ -619,6 +979,8 @@ function selectAllForActiveLane() {
   const lane = getLane(activeLaneKey);
   selectedChampionIdsByLane[activeLaneKey] = new Set(allChampions.map((champion) => champion.id));
   syncChampionPool();
+  syncPresetChampionsWithPools(activeLaneKey);
+  if (!assignments) renderEmptyBoard();
   statusLabel.textContent = `${lane.label} 후보에 전체 챔피언을 선택했습니다.`;
 }
 
@@ -723,6 +1085,7 @@ addListener(clearButton, "click", () => {
     input.value = "";
   });
   selectedPlayerNames.clear();
+  clearPresetPlayers();
   updateFilledCount();
   renderPlayerPool();
   assignments = null;
@@ -733,8 +1096,52 @@ addListener(clearButton, "click", () => {
 addListener(randomizeButton, "click", randomizeDraft);
 
 addListener(teamBoard, "click", (event) => {
+  const presetTrigger = event.target.closest(".preset-trigger");
+  if (presetTrigger) {
+    togglePresetMenu(presetTrigger);
+    return;
+  }
+
+  const presetOption = event.target.closest(".preset-option");
+  if (presetOption) {
+    const picker = presetOption.closest(".preset-picker");
+    if (picker.dataset.presetType === "champion") {
+      setPresetChampion(picker.dataset.team, picker.dataset.lane, presetOption.dataset.championId || "");
+    } else {
+      setPresetPlayer(picker.dataset.team, picker.dataset.lane, presetOption.dataset.playerName || "");
+    }
+    return;
+  }
+
+  const lockButton = event.target.closest(".lock-button");
+  if (lockButton) {
+    const card = lockButton.closest(".assignment-card");
+    toggleAssignmentLock(card.dataset.team, card.dataset.lane, lockButton.dataset.lockType);
+    return;
+  }
+
   const card = event.target.closest(".assignment-card");
-  if (!card) return;
+  if (!card || card.classList.contains("is-empty")) return;
+  rerollCard(card.dataset.team, card.dataset.lane);
+});
+
+addListener(teamBoard, "keydown", (event) => {
+  const presetTrigger = event.target.closest(".preset-trigger");
+  if (presetTrigger && (event.key === "Enter" || event.key === " ")) {
+    event.preventDefault();
+    togglePresetMenu(presetTrigger);
+    return;
+  }
+
+  if (event.target.closest(".preset-option") && event.key === "Escape") {
+    closePresetMenus();
+    return;
+  }
+
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const card = event.target.closest(".assignment-card");
+  if (!card || card.classList.contains("is-empty") || event.target.closest(".lock-button")) return;
+  event.preventDefault();
   rerollCard(card.dataset.team, card.dataset.lane);
 });
 
@@ -768,3 +1175,9 @@ addListener(newPlayerInput, "keydown", (event) => {
 addListener(restorePoolButton, "click", restoreActiveLanePool);
 addListener(selectAllPoolButton, "click", selectAllForActiveLane);
 addListener(speedRange, "input", setSpeedLabel);
+addListener(document, "click", (event) => {
+  if (!event.target.closest(".preset-picker")) closePresetMenus();
+});
+addListener(document, "keydown", (event) => {
+  if (event.key === "Escape") closePresetMenus();
+});
