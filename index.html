@@ -8,9 +8,9 @@
       rel="icon"
       href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="10" fill="%23bff2dc"/><text x="32" y="39" font-size="22" text-anchor="middle" font-family="Arial" font-weight="700" fill="%23253043">RD</text></svg>'
     />
-    <link rel="stylesheet" href="styles.css?v=26" />
-    <script defer src="champion-data.js?v=26"></script>
-    <script defer src="script.js?v=26"></script>
+    <link rel="stylesheet" href="styles.css?v=27" />
+    <script defer src="champion-data.js?v=27"></script>
+    <script defer src="script.js?v=27"></script>
   </head>
   <body>
     <div class="page-backdrop" aria-hidden="true">
@@ -76,6 +76,17 @@
                 <strong>애니메이션 활성화</strong>
               </span>
             </label>
+            <label class="toggle-card">
+              <input id="fearlessToggle" type="checkbox" />
+              <span class="toggle-track"></span>
+              <span>
+                <strong>피어리스 적용</strong>
+                <small>세션 기록에 사용된 챔피언을 다음 배정에서 제외합니다.</small>
+              </span>
+            </label>
+            <button class="session-reset-button" id="resetSessionButton" type="button">
+              세션 초기화
+            </button>
           </div>
 
           <div class="status-card" aria-live="polite">
@@ -118,6 +129,9 @@
               <p class="eyebrow">랜덤 결과</p>
               <h2 id="boardTitle">팀 배정 보드</h2>
             </div>
+            <button class="play-session-button" id="playSessionButton" type="button" disabled>
+              플레이
+            </button>
           </div>
           <div class="team-board" id="teamBoard"></div>
         </section>
@@ -147,9 +161,10 @@
         <div class="section-heading">
           <p class="eyebrow">최근 결과</p>
           <h2 id="historyTitle">이번 세션 기록</h2>
+          <p>플레이 버튼을 눌러 확정한 경기만 세션 기록과 피어리스 룰에 반영됩니다.</p>
         </div>
         <div class="history-list" id="historyList">
-          <p class="empty-history">아직 생성된 결과가 없습니다.</p>
+          <p class="empty-history">아직 플레이 기록이 없습니다.</p>
         </div>
       </section>
     </main>

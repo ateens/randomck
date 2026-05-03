@@ -63,7 +63,8 @@ const presetChampionsBySlot = Object.fromEntries(
 
 let assignments = null;
 let activeLaneKey = lanes[0].key;
-let history = [];
+let sessionRecords = [];
+let lastRecordedSignature = "";
 
 const playerInputs = document.querySelector("#playerInputs");
 const playerPool = document.querySelector("#playerPool");
@@ -77,6 +78,8 @@ const sampleButton = document.querySelector("#sampleButton");
 const clearButton = document.querySelector("#clearButton");
 const uniqueChampionToggle = document.querySelector("#uniqueChampionToggle");
 const animationToggle = document.querySelector("#animationToggle");
+const fearlessToggle = document.querySelector("#fearlessToggle");
+const resetSessionButton = document.querySelector("#resetSessionButton");
 const speedRange = document.querySelector("#speedRange");
 const speedLabel = document.querySelector("#speedLabel");
 const statusLabel = document.querySelector("#statusLabel");
@@ -86,6 +89,7 @@ const poolCount = document.querySelector("#poolCount");
 const restorePoolButton = document.querySelector("#restorePoolButton");
 const selectAllPoolButton = document.querySelector("#selectAllPoolButton");
 const historyList = document.querySelector("#historyList");
+const playSessionButton = document.querySelector("#playSessionButton");
 
 function championImage(id) {
   return `${CHAMPION_ASSET_BASE}/${id}.png`;
@@ -131,6 +135,31 @@ function selectedChampionsForLane(laneKey) {
   const defaultIds = defaultLaneChampionIdSets[laneKey] || new Set();
   const fallbackChampions = allChampions.filter((champion) => defaultIds.has(champion.id));
   return (fallbackChampions.length > 0 ? fallbackChampions : allChampions).map(championObject);
+}
+
+function sessionUsedChampionIds() {
+  return new Set(
+    sessionRecords.flatMap((record) =>
+      record.lanes.flatMap((laneRecord) => [
+        laneRecord.blue.champion.id,
+        laneRecord.red.champion.id
+      ])
+    )
+  );
+}
+
+function championsForDraftLane(laneKey, bannedChampionIds = new Set()) {
+  const lanePool = selectedChampionsForLane(laneKey);
+  if (bannedChampionIds.size === 0) return lanePool;
+
+  const filteredLanePool = lanePool.filter((champion) => !bannedChampionIds.has(champion.id));
+  if (filteredLanePool.length > 0) return filteredLanePool;
+
+  const globalFallback = allChampions
+    .filter((champion) => !bannedChampionIds.has(champion.id))
+    .map(championObject);
+
+  return globalFallback.length > 0 ? globalFallback : lanePool;
 }
 
 function shuffle(items) {
@@ -550,6 +579,36 @@ function getAssignment(teamKey, laneKey) {
   return assignments?.[teamKey]?.find((entry) => entry.lane === laneKey);
 }
 
+function assignmentSignature(source = assignments) {
+  if (!source) return "";
+  return JSON.stringify(
+    lanes.map((lane) => ({
+      lane: lane.key,
+      blue: assignmentFrom(source, "blue", lane.key)
+        ? {
+            player: assignmentFrom(source, "blue", lane.key).player,
+            champion: assignmentFrom(source, "blue", lane.key).champion.id
+          }
+        : null,
+      red: assignmentFrom(source, "red", lane.key)
+        ? {
+            player: assignmentFrom(source, "red", lane.key).player,
+            champion: assignmentFrom(source, "red", lane.key).champion.id
+          }
+        : null
+    }))
+  );
+}
+
+function updatePlaySessionButton() {
+  if (!playSessionButton) return;
+
+  const signature = assignmentSignature();
+  const canRecord = Boolean(assignments && signature && signature !== lastRecordedSignature);
+  playSessionButton.disabled = !canRecord;
+  playSessionButton.textContent = canRecord ? "플레이" : assignments ? "기록 완료" : "플레이";
+}
+
 function lockedCount() {
   const lockedSlots = new Set(
     Object.entries(presetPlayersBySlot)
@@ -576,6 +635,7 @@ function lockedCount() {
 
 function createAssignments() {
   const players = getPlayers();
+  const fearlessChampionIds = fearlessToggle?.checked ? sessionUsedChampionIds() : new Set();
   const fixedPlayersBySlot = new Map();
   const usedFixedPlayers = new Set();
 
@@ -603,14 +663,20 @@ function createAssignments() {
     assignments
       ? Object.values(assignments)
           .flat()
-          .filter((row) => isFullLocked(row) && row.champion && players.includes(row.player))
+          .filter(
+            (row) =>
+              isFullLocked(row) &&
+              row.champion &&
+              players.includes(row.player) &&
+              !fearlessChampionIds.has(row.champion.id)
+          )
           .map((row) => row.champion.id)
       : []
   );
 
   if (uniqueChampionToggle.checked) {
     Object.values(presetChampionsBySlot).forEach((championId) => {
-      if (championId) usedChampions.add(championId);
+      if (championId && !fearlessChampionIds.has(championId)) usedChampions.add(championId);
     });
   }
 
@@ -625,7 +691,11 @@ function createAssignments() {
       const previousRow = getAssignment(team.key, lane.key);
       const locks = { ...defaultLocks(), ...(previousRow?.locks || {}) };
       const hasPresetPlayer = Boolean(presetPlayersBySlot[key] && players.includes(presetPlayersBySlot[key]));
-      const presetChampion = presetChampionForSlot(team.key, lane.key);
+      const requestedPresetChampion = presetChampionForSlot(team.key, lane.key);
+      const presetChampion =
+        requestedPresetChampion && !fearlessChampionIds.has(requestedPresetChampion.id)
+          ? requestedPresetChampion
+          : null;
       const hasPresetChampion = Boolean(presetChampion);
 
       if (hasPresetPlayer && hasPresetChampion) {
@@ -636,11 +706,16 @@ function createAssignments() {
         if (locks.all) locks.position = false;
       }
 
-      const keepChampion = Boolean(locks.all && previousRow?.champion && players.includes(previousRow.player));
+      const keepChampion = Boolean(
+        locks.all &&
+          previousRow?.champion &&
+          players.includes(previousRow.player) &&
+          !fearlessChampionIds.has(previousRow.champion.id)
+      );
       const champion = presetChampion || (
         keepChampion
           ? previousRow.champion
-          : drawChampion(lane.key, usedChampions, previousRow?.champion?.id)
+          : drawChampion(lane.key, usedChampions, previousRow?.champion?.id, fearlessChampionIds)
       );
 
       if (presetChampion) usedChampions.add(presetChampion.id);
@@ -657,8 +732,13 @@ function createAssignments() {
   return nextAssignments;
 }
 
-function drawChampion(laneKey, usedChampions = new Set(), currentId = "") {
-  const pool = selectedChampionsForLane(laneKey);
+function drawChampion(
+  laneKey,
+  usedChampions = new Set(),
+  currentId = "",
+  bannedChampionIds = fearlessToggle?.checked ? sessionUsedChampionIds() : new Set()
+) {
+  const pool = championsForDraftLane(laneKey, bannedChampionIds);
   const uniquePool = pool.filter((champion) => !usedChampions.has(champion.id) && champion.id !== currentId);
   const targetPool = uniqueChampionToggle.checked && uniquePool.length > 0 ? uniquePool : pool;
   const champion = pickRandom(targetPool);
@@ -729,6 +809,7 @@ function renderLaneCenterColumn(animated = false) {
 }
 
 function randomPreview() {
+  const bannedChampions = fearlessToggle?.checked ? sessionUsedChampionIds() : new Set();
   teamBoard.querySelectorAll(".assignment-card").forEach((card, index) => {
     const row = getAssignment(card.dataset.team, card.dataset.lane);
     const lane = getLane(card.dataset.lane) || lanes[index % lanes.length];
@@ -745,7 +826,7 @@ function randomPreview() {
       avatar.innerHTML = `<img src="${presetChampion.image}" alt="${presetChampion.name}" />`;
       championName.textContent = presetChampion.name;
     } else if (!fullLocked && avatar && championName) {
-      const champion = pickRandom(selectedChampionsForLane(lane.key));
+      const champion = pickRandom(championsForDraftLane(lane.key, bannedChampions));
       avatar.innerHTML = `<img src="${champion.image}" alt="${champion.name}" />`;
       championName.textContent = champion.name;
     }
@@ -879,6 +960,7 @@ function updateDraftOverlaySlot(slot, row) {
 async function playDraftOverlaySlot(slot, finalRow, laneKey, shouldCancel) {
   if (!slot || !finalRow || shouldCancel()) return false;
 
+  const bannedChampions = fearlessToggle?.checked ? sessionUsedChampionIds() : new Set();
   slot.classList.add("is-active");
   const previewInterval = window.setInterval(() => {
     if (shouldCancel()) {
@@ -888,7 +970,7 @@ async function playDraftOverlaySlot(slot, finalRow, laneKey, shouldCancel) {
 
     updateDraftOverlaySlot(slot, {
       player: pickRandom(getPlayers()),
-      champion: pickRandom(selectedChampionsForLane(laneKey))
+      champion: pickRandom(championsForDraftLane(laneKey, bannedChampions))
     });
   }, 82);
 
@@ -1071,9 +1153,14 @@ function randomizeDraft() {
   randomizeButton.disabled = true;
   document.body.classList.add("is-randomizing");
   const activeLockCount = lockedCount();
+  const fearlessBanCount = fearlessToggle?.checked ? sessionUsedChampionIds().size : 0;
+  const optionMessages = [
+    activeLockCount > 0 ? `고정 슬롯 ${activeLockCount}개` : "",
+    fearlessBanCount > 0 ? `피어리스 제외 ${fearlessBanCount}개` : ""
+  ].filter(Boolean);
   statusLabel.textContent =
-    activeLockCount > 0
-      ? `배정 중입니다. 사전 지정과 고정 슬롯 ${activeLockCount}개를 반영합니다.`
+    optionMessages.length > 0
+      ? `배정 중입니다. ${optionMessages.join(", ")}를 반영합니다.`
       : "배정 중입니다. 팀과 라인을 섞고 있습니다.";
 
   if (animationToggle?.checked) {
@@ -1092,18 +1179,18 @@ function randomizeDraft() {
         assignments = nextAssignments;
         clearPresetPlayers();
         renderAssignments(true);
-        pushHistory();
+        updatePlaySessionButton();
         statusLabel.textContent =
           activeLockCount > 0
-            ? "배정 완료. 사전 지정과 고정 옵션을 반영했습니다."
-            : "배정 완료. 결과 카드를 클릭하면 챔피언만 다시 뽑습니다.";
+            ? "배정 완료. 사전 지정과 고정 옵션을 반영했습니다. 플레이 버튼을 누르면 세션 기록에 저장됩니다."
+            : "배정 완료. 플레이 버튼을 누르면 이번 결과가 세션 기록에 저장됩니다.";
       } catch (error) {
         console.error(error);
         if (nextAssignments) {
           assignments = nextAssignments;
           clearPresetPlayers();
           renderAssignments(true);
-          pushHistory();
+          updatePlaySessionButton();
         }
         statusLabel.textContent = "배정은 완료했지만 연출 표시 중 문제가 발생했습니다.";
       } finally {
@@ -1123,11 +1210,11 @@ function randomizeDraft() {
     assignments = createAssignments();
     clearPresetPlayers();
     renderAssignments(true);
-    pushHistory();
+    updatePlaySessionButton();
     statusLabel.textContent =
       activeLockCount > 0
-        ? "배정 완료. 사전 지정과 고정 옵션을 반영했습니다."
-        : "배정 완료. 결과 카드를 클릭하면 챔피언만 다시 뽑습니다.";
+        ? "배정 완료. 사전 지정과 고정 옵션을 반영했습니다. 플레이 버튼을 누르면 세션 기록에 저장됩니다."
+        : "배정 완료. 플레이 버튼을 누르면 이번 결과가 세션 기록에 저장됩니다.";
     document.body.classList.remove("is-randomizing");
     randomizeButton.disabled = false;
   }, duration);
@@ -1148,7 +1235,8 @@ function rerollCard(teamKey, laneKey) {
       .map((entry) => entry.champion.id)
       .filter((id) => id !== row.champion.id)
   );
-  row.champion = drawChampion(laneKey, usedChampions, row.champion.id);
+  const bannedChampions = fearlessToggle?.checked ? sessionUsedChampionIds() : new Set();
+  row.champion = drawChampion(laneKey, usedChampions, row.champion.id, bannedChampions);
 
   const card = teamBoard.querySelector(`[data-team="${teamKey}"][data-lane="${laneKey}"]`);
   if (!card) return;
@@ -1157,6 +1245,7 @@ function rerollCard(teamKey, laneKey) {
   window.setTimeout(() => {
     card.querySelector(".champion-avatar").innerHTML = `<img src="${row.champion.image}" alt="${row.champion.name}" loading="lazy" />`;
     card.querySelector(".champion-name").textContent = row.champion.name;
+    updatePlaySessionButton();
     statusLabel.textContent = `${teamLabel(teamKey)} ${getLane(laneKey).label} 챔피언을 다시 뽑았습니다.`;
   }, 250);
   window.setTimeout(() => card.classList.remove("is-rerolling"), 590);
@@ -1176,6 +1265,7 @@ function toggleAssignmentLock(teamKey, laneKey, lockType) {
     row.locks.position = nextPositionLock;
   }
   renderAssignments(false);
+  updatePlaySessionButton();
 
   const lockLabel = lockType === "all" ? "전체" : "포지션";
   const objectParticle = lockType === "all" ? "를" : "을";
@@ -1325,42 +1415,96 @@ function selectAllForActiveLane() {
   statusLabel.textContent = `${lane.label} 후보에 전체 챔피언을 선택했습니다.`;
 }
 
-function pushHistory() {
+function snapshotAssignment(teamKey, laneKey) {
+  const row = assignmentFrom(assignments, teamKey, laneKey);
+  return {
+    player: row.player,
+    champion: { ...row.champion }
+  };
+}
+
+function createSessionRecord() {
   const now = new Date();
   const formatter = new Intl.DateTimeFormat("ko-KR", {
     hour: "2-digit",
-    minute: "2-digit"
+    minute: "2-digit",
+    second: "2-digit"
   });
-  const blueTop = assignments.blue.find((entry) => entry.lane === "top");
-  const redTop = assignments.red.find((entry) => entry.lane === "top");
-  history = [
-    {
-      time: formatter.format(now),
-      summary: [
-        `블루 탑 ${blueTop.player}`,
-        `레드 탑 ${redTop.player}`,
-        `블루 첫 챔피언 ${assignments.blue[0].champion.name}`,
-        `레드 첫 챔피언 ${assignments.red[0].champion.name}`
-      ]
-    },
-    ...history
-  ].slice(0, 5);
-  renderHistory();
+
+  return {
+    id: `${now.getTime()}`,
+    time: formatter.format(now),
+    lanes: lanes.map((lane) => ({
+      key: lane.key,
+      label: lane.label,
+      blue: snapshotAssignment("blue", lane.key),
+      red: snapshotAssignment("red", lane.key)
+    }))
+  };
 }
 
-function renderHistory() {
-  if (history.length === 0) {
-    historyList.innerHTML = `<p class="empty-history">아직 생성된 결과가 없습니다.</p>`;
+function recordCurrentSession() {
+  if (!assignments) {
+    statusLabel.textContent = "먼저 랜덤 배정을 완료하세요.";
     return;
   }
 
-  historyList.innerHTML = history
+  const signature = assignmentSignature();
+  if (!signature || signature === lastRecordedSignature) {
+    statusLabel.textContent = "이미 이번 결과를 세션 기록에 저장했습니다.";
+    updatePlaySessionButton();
+    return;
+  }
+
+  sessionRecords = [createSessionRecord(), ...sessionRecords];
+  lastRecordedSignature = signature;
+  renderHistory();
+  updatePlaySessionButton();
+
+  const usedCount = sessionUsedChampionIds().size;
+  statusLabel.textContent = `플레이 기록을 저장했습니다. 피어리스 적용 시 ${usedCount}개 챔피언이 제외됩니다.`;
+}
+
+function resetSessionRecords() {
+  sessionRecords = [];
+  lastRecordedSignature = "";
+  renderHistory();
+  updatePlaySessionButton();
+  statusLabel.textContent = "세션 기록을 초기화했습니다. 피어리스 제외 챔피언도 모두 해제되었습니다.";
+}
+
+function renderHistory() {
+  if (sessionRecords.length === 0) {
+    historyList.innerHTML = `<p class="empty-history">아직 플레이 기록이 없습니다.</p>`;
+    return;
+  }
+
+  historyList.innerHTML = sessionRecords
     .map(
-      (item) => `
+      (item, index) => `
       <article class="history-item">
-        <div class="history-time">${item.time}</div>
-        <div class="history-summary">
-          ${item.summary.map((summary) => `<span class="history-pill">${summary}</span>`).join("")}
+        <div class="history-time">
+          <strong>${sessionRecords.length - index}경기</strong>
+          <span>${item.time}</span>
+        </div>
+        <div class="history-match-grid">
+          ${item.lanes
+            .map(
+              (laneRecord) => `
+              <div class="history-lane-row">
+                <span class="history-lane-name">${laneRecord.label}</span>
+                <span class="history-team-result blue">
+                  <strong>${laneRecord.blue.player}</strong>
+                  <span>${laneRecord.blue.champion.name}</span>
+                </span>
+                <span class="history-team-result red">
+                  <strong>${laneRecord.red.player}</strong>
+                  <span>${laneRecord.red.champion.name}</span>
+                </span>
+              </div>
+            `
+            )
+            .join("")}
         </div>
       </article>
     `
@@ -1412,6 +1556,7 @@ renderEmptyBoard();
 renderLaneTabs();
 renderChampionPool();
 renderHistory();
+updatePlaySessionButton();
 observeReveal();
 addButtonRipples();
 setSpeedLabel();
@@ -1430,11 +1575,15 @@ addListener(clearButton, "click", () => {
   updateFilledCount();
   renderPlayerPool();
   assignments = null;
+  lastRecordedSignature = "";
   renderEmptyBoard();
+  updatePlaySessionButton();
   statusLabel.textContent = "입력을 초기화했습니다. 참가자 10명을 다시 입력하세요.";
 });
 
 addListener(randomizeButton, "click", randomizeDraft);
+addListener(playSessionButton, "click", recordCurrentSession);
+addListener(resetSessionButton, "click", resetSessionRecords);
 
 addListener(teamBoard, "click", (event) => {
   const presetTrigger = event.target.closest(".preset-trigger");
@@ -1516,6 +1665,12 @@ addListener(newPlayerInput, "keydown", (event) => {
 addListener(restorePoolButton, "click", restoreActiveLanePool);
 addListener(selectAllPoolButton, "click", selectAllForActiveLane);
 addListener(speedRange, "input", setSpeedLabel);
+addListener(fearlessToggle, "change", () => {
+  const usedCount = sessionUsedChampionIds().size;
+  statusLabel.textContent = fearlessToggle.checked
+    ? `피어리스 룰을 적용합니다. 다음 배정부터 세션 기록의 ${usedCount}개 챔피언을 제외합니다.`
+    : "피어리스 룰을 해제했습니다.";
+});
 addListener(document, "click", (event) => {
   if (!event.target.closest(".preset-picker")) closePresetMenus();
 });
