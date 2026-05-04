@@ -91,6 +91,7 @@ let balanceRules = loadBalanceRules();
 let balanceAssignments = null;
 let balanceDragState = null;
 let pendingBalanceSwapSlots = new Set();
+let balanceScoreSort = { key: "name", direction: "asc" };
 
 const playerInputs = document.querySelector("#playerInputs");
 const playerPool = document.querySelector("#playerPool");
@@ -760,17 +761,62 @@ function averageScore(name) {
   return Math.round(total / lanes.length);
 }
 
+function balanceScoreSortButton(key, label) {
+  const isActive = balanceScoreSort.key === key;
+  const nextDirection = isActive && balanceScoreSort.direction === "asc" ? "내림차순" : "오름차순";
+  const indicator = isActive ? (balanceScoreSort.direction === "asc" ? "오름차순" : "내림차순") : "정렬";
+  return `
+    <button
+      class="balance-score-sort-button ${isActive ? "is-active" : ""}"
+      type="button"
+      data-score-sort="${key}"
+      aria-pressed="${isActive}"
+      aria-label="${label} ${nextDirection} 정렬"
+    >
+      <span>${label}</span>
+      <small>${indicator}</small>
+    </button>
+  `;
+}
+
+function sortedBalanceScoreNames() {
+  const names = orderedPlayerPoolNames();
+  const { key, direction } = balanceScoreSort;
+  const directionMultiplier = direction === "asc" ? 1 : -1;
+
+  if (key === "name") {
+    return direction === "asc" ? names : [...names].reverse();
+  }
+
+  return names.sort((firstName, secondName) => {
+    const firstValue = key === "average" ? averageScore(firstName) : laneScore(firstName, key);
+    const secondValue = key === "average" ? averageScore(secondName) : laneScore(secondName, key);
+    const valueDiff = (firstValue - secondValue) * directionMultiplier;
+    return valueDiff || koreanNameSorter.compare(firstName, secondName);
+  });
+}
+
+function toggleBalanceScoreSort(key) {
+  if (!key) return;
+
+  balanceScoreSort = {
+    key,
+    direction: balanceScoreSort.key === key && balanceScoreSort.direction === "asc" ? "desc" : "asc"
+  };
+  renderBalanceScores();
+}
+
 function renderBalanceScores() {
   if (!balanceScoreGrid) return;
 
   balanceScoreGrid.innerHTML = `
     <div class="balance-score-head" role="row">
-      <span>플레이어</span>
-      ${lanes.map((lane) => `<span>${lane.label}</span>`).join("")}
-      <span>평균</span>
+      ${balanceScoreSortButton("name", "플레이어")}
+      ${lanes.map((lane) => balanceScoreSortButton(lane.key, lane.label)).join("")}
+      ${balanceScoreSortButton("average", "평균")}
       <span>수정</span>
     </div>
-    ${orderedPlayerPoolNames()
+    ${sortedBalanceScoreNames()
       .map((name) => {
         const scores = scoresForPlayer(name);
         return `
@@ -870,6 +916,7 @@ function saveBalanceScoreRow(row) {
     updateBalanceAssignmentScores(balanceAssignments);
     renderBalanceBoard(false);
   }
+  renderBalanceScores();
 }
 
 function updateBalanceScore(input) {
@@ -3175,6 +3222,16 @@ addListener(balanceScoreGrid, "focusout", (event) => {
   if (input) settleBalanceScore(input);
 });
 addListener(balanceScoreGrid, "click", (event) => {
+  const sortButton = event.target.closest("[data-score-sort]");
+  if (sortButton) {
+    if (balanceScoreGrid.querySelector(".balance-player-row.is-editing")) {
+      setSettingsStatus("라인별 영향력을 저장한 뒤 정렬하세요.");
+      return;
+    }
+    toggleBalanceScoreSort(sortButton.dataset.scoreSort);
+    return;
+  }
+
   const button = event.target.closest(".balance-score-edit-button");
   if (button) handleBalanceScoreAction(button);
 });
