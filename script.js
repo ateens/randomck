@@ -455,7 +455,7 @@ function savePlayerScoreToDatabase(name, laneKey, score) {
     body: JSON.stringify({ name, laneKey, score })
   }).catch(() => {
     databaseStorageReady = false;
-    databaseStatusMessage = "PostgreSQL 저장 실패: 실력 점수가 저장되지 않았습니다.";
+    databaseStatusMessage = "PostgreSQL 저장 실패: 숙련도가 저장되지 않았습니다.";
   });
 }
 
@@ -790,13 +790,13 @@ function renderBalanceScores() {
                     value="${clampScore(scores[lane.key], 50)}"
                     data-player-name="${escapeHtml(name)}"
                     data-lane="${lane.key}"
-                    aria-label="${escapeHtml(name)} ${lane.label} 점수"
+                    aria-label="${escapeHtml(name)} ${lane.label} 숙련도"
                   />
                 </label>
               `
               )
               .join("")}
-            <div class="balance-average" aria-label="${escapeHtml(name)} 평균 점수">
+            <div class="balance-average" aria-label="${escapeHtml(name)} 평균 숙련도">
               <span class="balance-average-value">${averageScore(name)}</span>
             </div>
           </article>
@@ -1470,18 +1470,14 @@ function renderBalanceSummary() {
 
   if (!balanceAssignments) {
     balanceSummary.innerHTML = `
-      <strong>점수차 대기</strong>
-      <span>라인차 합계 대기</span>
-      <span>포지션 적합도 대기</span>
+      <strong>포지션 적합도 대기</strong>
     `;
     return;
   }
 
-  const { diff, laneDiff, totalFit } = balanceAssignments.meta;
+  const { totalFit } = balanceAssignments.meta;
   balanceSummary.innerHTML = `
-    <strong>점수차 ${diff}점</strong>
-    <span>라인차 합계 ${laneDiff}점</span>
-    <span>포지션 적합도 ${totalFit}점</span>
+    <strong>포지션 적합도 ${totalFit}점</strong>
   `;
 }
 
@@ -1503,7 +1499,7 @@ function balanceCardMarkup(team, lane, row, animated, index) {
       <span class="balance-card-score">${scoreText}</span>
       <span class="balance-card-main">
         <strong>${escapeHtml(playerText)}</strong>
-        <span>${lane.label} 점수</span>
+        <span>${lane.label} 숙련도</span>
       </span>
     </article>
   `;
@@ -1541,7 +1537,7 @@ function renderBalanceBoard(animated = false) {
 
 function renderBalanceLaneCenterColumn(animated = false) {
   return `
-    <div class="lane-center-list balance-lane-center-list" aria-label="라인별 점수 차이">
+    <div class="lane-center-list balance-lane-center-list" aria-label="라인별 숙련도 차이">
       ${lanes
         .map((lane, index) => {
           const blueRow = assignmentFrom(balanceAssignments, "blue", lane.key);
@@ -1720,7 +1716,7 @@ function randomizeBalanceDraft() {
 
   balanceStartButton.disabled = true;
   document.body.classList.add("is-randomizing");
-  setBalanceStatus("라인별 실력 점수와 조건을 반영해 조합을 찾고 있습니다.");
+  setBalanceStatus("라인별 숙련도와 조건을 반영해 조합을 찾고 있습니다.");
 
   window.setTimeout(() => {
     try {
