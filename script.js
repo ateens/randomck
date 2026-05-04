@@ -91,7 +91,7 @@ let balanceRules = loadBalanceRules();
 let balanceAssignments = null;
 let balanceDragState = null;
 let pendingBalanceSwapSlots = new Set();
-let balanceScoreSort = { key: "name", direction: "asc" };
+let balanceScoreSort = { key: "average", direction: "desc" };
 
 const playerInputs = document.querySelector("#playerInputs");
 const playerPool = document.querySelector("#playerPool");
