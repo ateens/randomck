@@ -455,7 +455,7 @@ function savePlayerScoreToDatabase(name, laneKey, score) {
     body: JSON.stringify({ name, laneKey, score })
   }).catch(() => {
     databaseStorageReady = false;
-    databaseStatusMessage = "PostgreSQL 저장 실패: 숙련도가 저장되지 않았습니다.";
+    databaseStatusMessage = "PostgreSQL 저장 실패: 영향력이 저장되지 않았습니다.";
   });
 }
 
@@ -768,6 +768,7 @@ function renderBalanceScores() {
       <span>플레이어</span>
       ${lanes.map((lane) => `<span>${lane.label}</span>`).join("")}
       <span>평균</span>
+      <span>수정</span>
     </div>
     ${orderedPlayerPoolNames()
       .map((name) => {
@@ -790,15 +791,19 @@ function renderBalanceScores() {
                     value="${clampScore(scores[lane.key], 50)}"
                     data-player-name="${escapeHtml(name)}"
                     data-lane="${lane.key}"
-                    aria-label="${escapeHtml(name)} ${lane.label} 숙련도"
+                    aria-label="${escapeHtml(name)} ${lane.label} 영향력"
+                    disabled
                   />
                 </label>
               `
               )
               .join("")}
-            <div class="balance-average" aria-label="${escapeHtml(name)} 평균 숙련도">
+            <div class="balance-average" aria-label="${escapeHtml(name)} 평균 영향력">
               <span class="balance-average-value">${averageScore(name)}</span>
             </div>
+            <button class="mini-button balance-score-edit-button" type="button" data-score-action="edit" data-player-name="${escapeHtml(name)}">
+              수정
+            </button>
           </article>
         `;
       })
@@ -814,25 +819,66 @@ function updateBalanceAverage(name) {
   if (average) average.textContent = averageScore(name);
 }
 
-function updateBalanceScore(input) {
-  const name = input.dataset.playerName;
-  const laneKey = input.dataset.lane;
-  if (!name || !laneKey) return;
+function rowAverageFromInputs(row) {
+  if (!row) return 0;
+  const inputs = [...row.querySelectorAll(".balance-score-input")];
+  if (inputs.length === 0) return 0;
+  const total = inputs.reduce((sum, input) => sum + clampScore(input.value, 50), 0);
+  return Math.round(total / inputs.length);
+}
 
-  if (input.value === "") return;
+function updateBalanceRowAverage(row) {
+  const average = row?.querySelector(".balance-average-value");
+  if (average) average.textContent = rowAverageFromInputs(row);
+}
 
-  const score = clampScore(input.value, scoresForPlayer(name)[laneKey]);
-  input.value = String(score);
-  scoresForPlayer(name)[laneKey] = score;
-  savePlayerScoreToDatabase(name, laneKey, score);
+function setBalanceScoreRowEditing(row, isEditing) {
+  if (!row) return;
+  row.classList.toggle("is-editing", isEditing);
+  row.querySelectorAll(".balance-score-input").forEach((input) => {
+    input.disabled = !isEditing;
+  });
+  const button = row.querySelector(".balance-score-edit-button");
+  if (button) {
+    button.dataset.scoreAction = isEditing ? "save" : "edit";
+    button.textContent = isEditing ? "저장" : "수정";
+  }
+}
+
+function saveBalanceScoreRow(row) {
+  if (!row) return;
+  const name = row.dataset.playerName;
+  if (!name) return;
+
+  row.querySelectorAll(".balance-score-input").forEach((input) => {
+    const laneKey = input.dataset.lane;
+    if (!laneKey) return;
+    const score = clampScore(input.value, scoresForPlayer(name)[laneKey]);
+    input.value = String(score);
+    scoresForPlayer(name)[laneKey] = score;
+    savePlayerScoreToDatabase(name, laneKey, score);
+  });
+
   updateBalanceAverage(name);
+  setBalanceScoreRowEditing(row, false);
+  setSettingsStatus(
+    databaseStorageReady
+      ? `${name}의 라인별 영향력을 저장했습니다.`
+      : "PostgreSQL 연결이 없어 화면에만 반영됐고 저장되지 않았습니다."
+  );
   if (balanceAssignments) {
     updateBalanceAssignmentScores(balanceAssignments);
     renderBalanceBoard(false);
   }
 }
 
+function updateBalanceScore(input) {
+  if (input.disabled) return;
+  updateBalanceRowAverage(input.closest(".balance-player-row"));
+}
+
 function settleBalanceScore(input) {
+  if (input.disabled) return;
   const name = input.dataset.playerName;
   const laneKey = input.dataset.lane;
   if (!name || !laneKey) return;
@@ -844,6 +890,23 @@ function settleBalanceScore(input) {
   }
 
   updateBalanceScore(input);
+}
+
+function handleBalanceScoreAction(button) {
+  const row = button.closest(".balance-player-row");
+  if (!row) return;
+
+  if (button.dataset.scoreAction === "save") {
+    saveBalanceScoreRow(row);
+    return;
+  }
+
+  balanceScoreGrid.querySelectorAll(".balance-player-row.is-editing").forEach((editingRow) => {
+    if (editingRow !== row) setBalanceScoreRowEditing(editingRow, false);
+  });
+  setBalanceScoreRowEditing(row, true);
+  row.querySelector(".balance-score-input")?.focus();
+  setSettingsStatus(`${row.dataset.playerName}의 라인별 영향력을 수정합니다.`);
 }
 
 function setBalanceStatus(message) {
@@ -1478,6 +1541,7 @@ function renderBalanceSummary() {
   const { totalFit } = balanceAssignments.meta;
   balanceSummary.innerHTML = `
     <strong>포지션 적합도 ${totalFit}점</strong>
+    <small class="balance-drag-guide">플레이어 카드를 드래그해서 위치 변경</small>
   `;
 }
 
@@ -1499,7 +1563,7 @@ function balanceCardMarkup(team, lane, row, animated, index) {
       <span class="balance-card-score">${scoreText}</span>
       <span class="balance-card-main">
         <strong>${escapeHtml(playerText)}</strong>
-        <span>${lane.label} 숙련도</span>
+        <span>${lane.label} 영향력</span>
       </span>
     </article>
   `;
@@ -1537,7 +1601,7 @@ function renderBalanceBoard(animated = false) {
 
 function renderBalanceLaneCenterColumn(animated = false) {
   return `
-    <div class="lane-center-list balance-lane-center-list" aria-label="라인별 숙련도 차이">
+    <div class="lane-center-list balance-lane-center-list" aria-label="라인별 영향력 차이">
       ${lanes
         .map((lane, index) => {
           const blueRow = assignmentFrom(balanceAssignments, "blue", lane.key);
@@ -1716,7 +1780,7 @@ function randomizeBalanceDraft() {
 
   balanceStartButton.disabled = true;
   document.body.classList.add("is-randomizing");
-  setBalanceStatus("라인별 숙련도와 조건을 반영해 조합을 찾고 있습니다.");
+  setBalanceStatus("라인별 영향력과 조건을 반영해 조합을 찾고 있습니다.");
 
   window.setTimeout(() => {
     try {
@@ -3110,6 +3174,10 @@ addListener(balanceScoreGrid, "input", (event) => {
 addListener(balanceScoreGrid, "focusout", (event) => {
   const input = event.target.closest(".balance-score-input");
   if (input) settleBalanceScore(input);
+});
+addListener(balanceScoreGrid, "click", (event) => {
+  const button = event.target.closest(".balance-score-edit-button");
+  if (button) handleBalanceScoreAction(button);
 });
 addListener(balanceAddTogetherButton, "click", addBalanceTogetherRule);
 addListener(balanceAddSeparateButton, "click", addBalancePairRule);
