@@ -761,9 +761,19 @@ function averageScore(name) {
   return Math.round(total / lanes.length);
 }
 
+function defaultBalanceScoreSortDirection(key) {
+  return key === "name" ? "asc" : "desc";
+}
+
 function balanceScoreSortButton(key, label) {
   const isActive = balanceScoreSort.key === key;
-  const nextDirection = isActive && balanceScoreSort.direction === "asc" ? "내림차순" : "오름차순";
+  const nextDirection = isActive
+    ? balanceScoreSort.direction === "asc"
+      ? "내림차순"
+      : "오름차순"
+    : defaultBalanceScoreSortDirection(key) === "asc"
+      ? "오름차순"
+      : "내림차순";
   const indicator = isActive ? (balanceScoreSort.direction === "asc" ? "오름차순" : "내림차순") : "정렬";
   return `
     <button
@@ -801,7 +811,12 @@ function toggleBalanceScoreSort(key) {
 
   balanceScoreSort = {
     key,
-    direction: balanceScoreSort.key === key && balanceScoreSort.direction === "asc" ? "desc" : "asc"
+    direction:
+      balanceScoreSort.key === key
+        ? balanceScoreSort.direction === "asc"
+          ? "desc"
+          : "asc"
+        : defaultBalanceScoreSortDirection(key)
   };
   renderBalanceScores();
 }
