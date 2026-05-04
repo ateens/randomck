@@ -27,6 +27,9 @@ const selectedChampionIdsByLane = Object.fromEntries(
 
 const PLAYER_POOL_STORAGE_KEY = "sekwangRandomCKPlayerPool";
 const PLAYER_SCORE_STORAGE_KEY = "sekwangRandomCKPlayerScores";
+const PLAYER_SCORE_PROFILE_VERSION_KEY = "sekwangRandomCKPlayerScoreProfileVersion";
+const BALANCE_RULE_STORAGE_KEY = "sekwangRandomCKBalanceRules";
+const DEFAULT_SCORE_PROFILE_VERSION = "2026-05-04-a";
 const defaultPlayerPool = [
   "상현",
   "지안",
@@ -47,8 +50,28 @@ const defaultPlayerPool = [
   "인의",
   "예지"
 ];
+const defaultPlayerSkillProfiles = {
+  상현: { top: 82, jungle: 68, mid: 74, bot: 61, support: 59 },
+  지안: { top: 55, jungle: 72, mid: 81, bot: 66, support: 70 },
+  지혜: { top: 61, jungle: 58, mid: 74, bot: 83, support: 76 },
+  지상: { top: 79, jungle: 64, mid: 69, bot: 62, support: 55 },
+  예진: { top: 48, jungle: 63, mid: 71, bot: 78, support: 82 },
+  예완: { top: 67, jungle: 84, mid: 60, bot: 57, support: 65 },
+  성원: { top: 74, jungle: 76, mid: 58, bot: 69, support: 52 },
+  강산: { top: 70, jungle: 59, mid: 83, bot: 64, support: 61 },
+  강희: { top: 57, jungle: 69, mid: 62, bot: 75, support: 80 },
+  은우: { top: 64, jungle: 55, mid: 72, bot: 85, support: 68 },
+  "태영(김)": { top: 86, jungle: 61, mid: 66, bot: 58, support: 54 },
+  "태영(윤)": { top: 59, jungle: 78, mid: 73, bot: 60, support: 67 },
+  선진: { top: 63, jungle: 70, mid: 55, bot: 82, support: 74 },
+  재윤: { top: 77, jungle: 57, mid: 80, bot: 65, support: 59 },
+  동근: { top: 72, jungle: 83, mid: 61, bot: 56, support: 62 },
+  승헌: { top: 66, jungle: 62, mid: 84, bot: 71, support: 57 },
+  인의: { top: 54, jungle: 74, mid: 68, bot: 63, support: 86 },
+  예지: { top: 58, jungle: 60, mid: 76, bot: 79, support: 81 }
+};
 let playerPoolNames = loadPlayerPoolNames();
-let selectedPlayerNames = new Set(playerPoolNames.slice(0, 10));
+let selectedPlayerNames = new Set(sortPlayerNames(playerPoolNames).slice(0, 10));
 let playerSkillScores = loadPlayerSkillScores();
 let databaseStorageReady = false;
 let databaseStatusMessage = "";
@@ -69,6 +92,10 @@ let assignments = null;
 let activeLaneKey = lanes[0].key;
 let sessionRecords = [];
 let lastRecordedSignature = "";
+let balanceRules = loadBalanceRules();
+let balanceAssignments = null;
+let balanceDragState = null;
+let pendingBalanceSwapSlots = new Set();
 
 const playerInputs = document.querySelector("#playerInputs");
 const playerPool = document.querySelector("#playerPool");
@@ -103,6 +130,28 @@ const settingsNewPlayerInput = document.querySelector("#settingsNewPlayerInput")
 const settingsAddPlayerButton = document.querySelector("#settingsAddPlayerButton");
 const settingsPlayerList = document.querySelector("#settingsPlayerList");
 const settingsStatusLabel = document.querySelector("#settingsStatusLabel");
+const balanceStatusLabel = document.querySelector("#balanceStatusLabel");
+const balanceParticipantPool = document.querySelector("#balanceParticipantPool");
+const balanceSelectedPlayerCount = document.querySelector("#balanceSelectedPlayerCount");
+const balanceTogetherSelects = [...document.querySelectorAll("[data-balance-together-player]")];
+const balanceSeparateFirst = document.querySelector("#balanceSeparateFirst");
+const balanceSeparateSecond = document.querySelector("#balanceSeparateSecond");
+const balanceFixedPlayer = document.querySelector("#balanceFixedPlayer");
+const balanceFixedLane = document.querySelector("#balanceFixedLane");
+const balanceExcludedPlayer = document.querySelector("#balanceExcludedPlayer");
+const balanceExcludedLane = document.querySelector("#balanceExcludedLane");
+const balanceAddTogetherButton = document.querySelector("#balanceAddTogetherButton");
+const balanceAddSeparateButton = document.querySelector("#balanceAddSeparateButton");
+const balanceAddFixedButton = document.querySelector("#balanceAddFixedButton");
+const balanceAddExcludedButton = document.querySelector("#balanceAddExcludedButton");
+const balanceTogetherList = document.querySelector("#balanceTogetherList");
+const balanceSeparateList = document.querySelector("#balanceSeparateList");
+const balanceFixedList = document.querySelector("#balanceFixedList");
+const balanceExcludedList = document.querySelector("#balanceExcludedList");
+const balanceStartButton = document.querySelector("#balanceStartButton");
+const balanceClearButton = document.querySelector("#balanceClearButton");
+const balanceSummary = document.querySelector("#balanceSummary");
+const balanceBoard = document.querySelector("#balanceBoard");
 
 function championImage(id) {
   return `${CHAMPION_ASSET_BASE}/${id}.png`;
@@ -203,6 +252,14 @@ function uniqueNames(names) {
     });
 }
 
+function sortPlayerNames(names) {
+  return [...names].sort(koreanNameSorter.compare);
+}
+
+function orderedPlayerPoolNames() {
+  return sortPlayerNames(playerPoolNames);
+}
+
 function loadPlayerPoolNames() {
   try {
     const storedNames = JSON.parse(window.localStorage.getItem(PLAYER_POOL_STORAGE_KEY) || "[]");
@@ -227,13 +284,19 @@ function clampScore(value, fallback = 50) {
   return Math.min(100, Math.max(0, Math.round(score)));
 }
 
-function defaultPlayerScores() {
-  return Object.fromEntries(lanes.map((lane) => [lane.key, 50]));
+function defaultPlayerScores(name = "") {
+  const profile = defaultPlayerSkillProfiles[name];
+  return Object.fromEntries(lanes.map((lane) => [lane.key, profile?.[lane.key] ?? 50]));
 }
 
-function sanitizePlayerScores(rawScores = {}) {
+function isFlatDefaultScoreSet(scores = {}) {
+  return lanes.every((lane) => clampScore(scores[lane.key], 50) === 50);
+}
+
+function sanitizePlayerScores(rawScores = {}, playerName = "") {
+  const fallbackScores = defaultPlayerScores(playerName);
   return Object.fromEntries(
-    lanes.map((lane) => [lane.key, clampScore(rawScores[lane.key], 50)])
+    lanes.map((lane) => [lane.key, clampScore(rawScores[lane.key], fallbackScores[lane.key])])
   );
 }
 
@@ -247,11 +310,145 @@ function loadPlayerSkillScores() {
     return Object.fromEntries(
       Object.entries(storedScores).map(([name, scores]) => [
         normalizeName(name),
-        sanitizePlayerScores(scores)
+        sanitizePlayerScores(scores, normalizeName(name))
       ])
     );
   } catch {
     return {};
+  }
+}
+
+function applyDefaultScoreProfilesToFlatScores() {
+  let didChange = false;
+  try {
+    if (window.localStorage.getItem(PLAYER_SCORE_PROFILE_VERSION_KEY) === DEFAULT_SCORE_PROFILE_VERSION) {
+      return false;
+    }
+  } catch {
+    // Local storage can be unavailable for file URLs in some browsers.
+  }
+
+  defaultPlayerPool.forEach((name) => {
+    const scores = playerSkillScores[name];
+    if (!scores || isFlatDefaultScoreSet(scores)) {
+      playerSkillScores[name] = defaultPlayerScores(name);
+      didChange = true;
+    }
+  });
+
+  try {
+    window.localStorage.setItem(PLAYER_SCORE_PROFILE_VERSION_KEY, DEFAULT_SCORE_PROFILE_VERSION);
+  } catch {
+    // Local storage can be unavailable for file URLs in some browsers.
+  }
+
+  if (didChange) savePlayerSkillScores();
+  return didChange;
+}
+
+function pairKey(firstName, secondName) {
+  return [firstName, secondName].sort(koreanNameSorter.compare).join("::");
+}
+
+function groupKey(members = []) {
+  return [...members].sort(koreanNameSorter.compare).join("::");
+}
+
+function sanitizeTogetherRules(rules = []) {
+  const seen = new Set();
+  return (Array.isArray(rules) ? rules : [])
+    .map((rule) => {
+      const members = uniqueNames(
+        Array.isArray(rule?.members)
+          ? rule.members
+          : [rule?.first || rule?.a || "", rule?.second || rule?.b || ""]
+      ).slice(0, 5);
+      return { members };
+    })
+    .filter((rule) => {
+      if (rule.members.length < 2) return false;
+      const key = groupKey(rule.members);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function sanitizePairRules(rules = []) {
+  const seen = new Set();
+  return (Array.isArray(rules) ? rules : [])
+    .map((rule) => {
+      const first = normalizeName(rule?.first || rule?.a || "");
+      const second = normalizeName(rule?.second || rule?.b || "");
+      return { first, second };
+    })
+    .filter((rule) => {
+      if (!rule.first || !rule.second || rule.first === rule.second) return false;
+      const key = pairKey(rule.first, rule.second);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function sanitizeFixedPositionRules(rules = []) {
+  const seenPlayers = new Set();
+  return (Array.isArray(rules) ? rules : [])
+    .map((rule) => {
+      const player = normalizeName(rule?.player || "");
+      const lane = getLane(rule?.lane)?.key || "";
+      return { player, lane };
+    })
+    .filter((rule) => {
+      if (!rule.player || !rule.lane || seenPlayers.has(rule.player)) return false;
+      seenPlayers.add(rule.player);
+      return true;
+    });
+}
+
+function sanitizeExcludedPositionRules(rules = []) {
+  const seen = new Set();
+  return (Array.isArray(rules) ? rules : [])
+    .map((rule) => {
+      const player = normalizeName(rule?.player || "");
+      const lane = getLane(rule?.lane)?.key || "";
+      return { player, lane };
+    })
+    .filter((rule) => {
+      const key = `${rule.player}::${rule.lane}`;
+      if (!rule.player || !rule.lane || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function sanitizeBalanceRules(rawRules = {}) {
+  return {
+    together: sanitizeTogetherRules(rawRules.together),
+    separate: sanitizePairRules(rawRules.separate),
+    fixed: sanitizeFixedPositionRules(rawRules.fixed),
+    excluded: sanitizeExcludedPositionRules(rawRules.excluded)
+  };
+}
+
+function loadBalanceRules() {
+  try {
+    const storedRules = JSON.parse(window.localStorage.getItem(BALANCE_RULE_STORAGE_KEY) || "{}");
+    if (!storedRules || typeof storedRules !== "object" || Array.isArray(storedRules)) {
+      return sanitizeBalanceRules();
+    }
+
+    return sanitizeBalanceRules(storedRules);
+  } catch {
+    return sanitizeBalanceRules();
+  }
+}
+
+function saveBalanceRules() {
+  try {
+    window.localStorage.setItem(BALANCE_RULE_STORAGE_KEY, JSON.stringify(balanceRules));
+  } catch {
+    // Local storage can be unavailable for file URLs in some browsers.
   }
 }
 
@@ -296,7 +493,7 @@ async function loadDatabaseState() {
     ]);
     playerSkillScores = sanitizeSkillScoreMap(data.playerSkillScores || {});
     sessionRecords = Array.isArray(data.sessionRecords) ? data.sessionRecords : [];
-    selectedPlayerNames = new Set(playerPoolNames.slice(0, 10));
+    selectedPlayerNames = new Set(sortPlayerNames(playerPoolNames).slice(0, 10));
   } catch {
     databaseStorageReady = false;
     databaseStatusMessage = "서버 API에 연결할 수 없어 브라우저 저장으로 동작 중입니다.";
@@ -306,7 +503,10 @@ async function loadDatabaseState() {
 function sanitizeSkillScoreMap(rawScores = {}) {
   return Object.fromEntries(
     Object.entries(rawScores)
-      .map(([name, scores]) => [normalizeName(name), sanitizePlayerScores(scores)])
+      .map(([name, scores]) => {
+        const normalizedName = normalizeName(name);
+        return [normalizedName, sanitizePlayerScores(scores, normalizedName)];
+      })
       .filter(([name]) => Boolean(name))
   );
 }
@@ -374,7 +574,7 @@ function resetSessionRecordsInDatabase() {
 
 function scoresForPlayer(name) {
   if (!playerSkillScores[name]) {
-    playerSkillScores[name] = defaultPlayerScores();
+    playerSkillScores[name] = defaultPlayerScores(name);
   }
   return playerSkillScores[name];
 }
@@ -394,7 +594,7 @@ function escapeHtml(value) {
 }
 
 function createPlayerInputs() {
-  const presetPlayers = playerPoolNames.filter((name) => selectedPlayerNames.has(name)).slice(0, 10);
+  const presetPlayers = orderedPlayerPoolNames().filter((name) => selectedPlayerNames.has(name)).slice(0, 10);
 
   playerInputs.innerHTML = Array.from({ length: 10 }, (_, index) => {
     const number = index + 1;
@@ -418,7 +618,9 @@ function handlePlayerInputChange() {
   syncPresetPlayersWithInputs();
   updateFilledCount();
   renderPlayerPool();
+  renderBalanceParticipantPool();
   renderBalanceScores();
+  renderBalanceControls();
   if (!assignments) renderEmptyBoard();
 }
 
@@ -443,10 +645,7 @@ function syncSelectedPlayersFromInputs() {
 function renderPlayerPool() {
   if (!playerPool) return;
 
-  const orderedNames = [
-    ...playerPoolNames.filter((name) => selectedPlayerNames.has(name)),
-    ...playerPoolNames.filter((name) => !selectedPlayerNames.has(name))
-  ];
+  const orderedNames = orderedPlayerPoolNames();
 
   selectedPlayerCount.textContent = `${selectedPlayerNames.size}/10 선택`;
   playerPool.innerHTML = orderedNames
@@ -461,6 +660,25 @@ function renderPlayerPool() {
     .join("");
 }
 
+function renderBalanceParticipantPool() {
+  if (!balanceParticipantPool) return;
+
+  if (balanceSelectedPlayerCount) {
+    balanceSelectedPlayerCount.textContent = selectedPlayerNames.size;
+  }
+
+  balanceParticipantPool.innerHTML = orderedPlayerPoolNames()
+    .map((name) => {
+      const isSelected = selectedPlayerNames.has(name);
+      return `
+        <button class="balance-participant-card ${isSelected ? "is-selected" : ""}" type="button" data-player-name="${escapeHtml(name)}" aria-pressed="${isSelected}">
+          <span>${escapeHtml(name)}</span>
+        </button>
+      `;
+    })
+    .join("");
+}
+
 function setSettingsStatus(message) {
   if (settingsStatusLabel) settingsStatusLabel.textContent = message;
 }
@@ -468,7 +686,7 @@ function setSettingsStatus(message) {
 function renderSettingsPlayers() {
   if (!settingsPlayerList) return;
 
-  settingsPlayerList.innerHTML = playerPoolNames
+  settingsPlayerList.innerHTML = orderedPlayerPoolNames()
     .map(
       (name) => `
         <article class="settings-player-row" data-player-name="${escapeHtml(name)}">
@@ -491,8 +709,10 @@ function rerenderPlayerViews() {
   syncPresetPlayersWithInputs();
   updateFilledCount();
   renderPlayerPool();
+  renderBalanceParticipantPool();
   renderSettingsPlayers();
   renderBalanceScores();
+  renderBalanceControls();
   if (!assignments) renderEmptyBoard();
 }
 
@@ -559,8 +779,9 @@ function renamePlayerName(oldName, rawNewName) {
     updatePlaySessionButton();
   }
 
-  playerSkillScores[newName] = playerSkillScores[oldName] || defaultPlayerScores();
+  playerSkillScores[newName] = playerSkillScores[oldName] || defaultPlayerScores(newName);
   delete playerSkillScores[oldName];
+  renameBalancePlayerReferences(oldName, newName);
   savePlayerPoolNames(false);
   savePlayerSkillScores();
   renamePlayerInDatabase(oldName, newName);
@@ -587,6 +808,7 @@ function deletePlayerName(name) {
     updatePlaySessionButton();
   }
 
+  deleteBalancePlayerReferences(name);
   savePlayerPoolNames(false);
   savePlayerSkillScores();
   deletePlayerFromDatabase(name);
@@ -609,7 +831,7 @@ function renderBalanceScores() {
       ${lanes.map((lane) => `<span>${lane.label}</span>`).join("")}
       <span>평균</span>
     </div>
-    ${playerPoolNames
+    ${orderedPlayerPoolNames()
       .map((name) => {
         const scores = scoresForPlayer(name);
         return `
@@ -667,6 +889,10 @@ function updateBalanceScore(input) {
   savePlayerSkillScores();
   savePlayerScoreToDatabase(name, laneKey, score);
   updateBalanceAverage(name);
+  if (balanceAssignments) {
+    updateBalanceAssignmentScores(balanceAssignments);
+    renderBalanceBoard(false);
+  }
 }
 
 function settleBalanceScore(input) {
@@ -681,6 +907,899 @@ function settleBalanceScore(input) {
   }
 
   updateBalanceScore(input);
+}
+
+function setBalanceStatus(message) {
+  if (balanceStatusLabel) balanceStatusLabel.textContent = message;
+}
+
+function activeBalancePlayers() {
+  return sortPlayerNames(uniqueNames(getPlayers()));
+}
+
+function balanceOptionMarkup(players, selectedPlayer = "") {
+  const orderedPlayers = sortPlayerNames(players);
+  return [
+    `<option value="" ${selectedPlayer ? "" : "selected"}>미지정</option>`,
+    ...orderedPlayers.map(
+      (player) =>
+        `<option value="${escapeHtml(player)}" ${player === selectedPlayer ? "selected" : ""}>${escapeHtml(player)}</option>`
+    )
+  ].join("");
+}
+
+function balanceLaneOptionMarkup(selectedLane = "") {
+  return [
+    `<option value="" ${selectedLane ? "" : "selected"}>미지정</option>`,
+    ...lanes.map(
+      (lane) =>
+        `<option value="${lane.key}" ${lane.key === selectedLane ? "selected" : ""}>${lane.label}</option>`
+    )
+  ].join("");
+}
+
+function balanceRuleSelects() {
+  return [...document.querySelectorAll(".balance-rule-form select")];
+}
+
+function balanceSelectLabel(select) {
+  return select.selectedOptions?.[0]?.textContent || "미지정";
+}
+
+function closeBalanceCustomSelects(exceptSelect = null) {
+  document.querySelectorAll(".balance-custom-select.is-open").forEach((customSelect) => {
+    if (customSelect === exceptSelect) return;
+    customSelect.classList.remove("is-open");
+    customSelect.querySelector(".balance-select-trigger")?.setAttribute("aria-expanded", "false");
+  });
+}
+
+function renderBalanceCustomSelect(select) {
+  if (!select) return;
+
+  select.classList.add("is-native-balance-select");
+  let customSelect = select.nextElementSibling;
+  if (!customSelect?.classList.contains("balance-custom-select")) {
+    customSelect = document.createElement("span");
+    customSelect.className = "balance-custom-select";
+    select.after(customSelect);
+  }
+
+  customSelect.dataset.value = select.value;
+  customSelect.innerHTML = `
+    <button class="balance-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" ${select.disabled ? "disabled" : ""}>
+      <span>${escapeHtml(balanceSelectLabel(select))}</span>
+      <span class="balance-select-arrow" aria-hidden="true">⌄</span>
+    </button>
+    <span class="balance-select-menu" role="listbox" aria-label="${escapeHtml(select.getAttribute("aria-label") || "선택")}">
+      ${[...select.options]
+        .map(
+          (option) => `
+            <button
+              class="balance-select-option ${option.value === select.value ? "is-selected" : ""}"
+              type="button"
+              role="option"
+              aria-selected="${option.value === select.value}"
+              data-value="${escapeHtml(option.value)}"
+            >
+              ${escapeHtml(option.textContent)}
+            </button>
+          `
+        )
+        .join("")}
+    </span>
+  `;
+}
+
+function renderBalanceCustomSelects() {
+  balanceRuleSelects().forEach(renderBalanceCustomSelect);
+}
+
+function visibleBalanceRulesForPlayers(players) {
+  const playerSet = new Set(players);
+  return {
+    together: balanceRules.together.filter((rule) => rule.members.every((player) => playerSet.has(player))),
+    separate: balanceRules.separate.filter((rule) => playerSet.has(rule.first) && playerSet.has(rule.second)),
+    fixed: balanceRules.fixed.filter((rule) => playerSet.has(rule.player)),
+    excluded: balanceRules.excluded.filter((rule) => playerSet.has(rule.player))
+  };
+}
+
+function balanceRuleListMarkup(rules, type) {
+  if (rules.length === 0) {
+    const emptyText = {
+      together: "함께 묶인 구성이 없습니다.",
+      separate: "분리할 구성이 없습니다.",
+      fixed: "고정된 포지션이 없습니다.",
+      excluded: "제외된 포지션이 없습니다."
+    }[type];
+    return `<p class="balance-rule-empty">${emptyText}</p>`;
+  }
+
+  return rules
+    .map((rule, index) => {
+      const label = (() => {
+        if (type === "together") return rule.members.map(escapeHtml).join(" · ");
+        if (type === "fixed") return `${escapeHtml(rule.player)} · ${getLane(rule.lane).label}`;
+        if (type === "excluded") return `${escapeHtml(rule.player)} · ${getLane(rule.lane).label} 제외`;
+        return `${escapeHtml(rule.first)} · ${escapeHtml(rule.second)}`;
+      })();
+      return `
+        <article class="balance-rule-chip">
+          <span>${label}</span>
+          <button type="button" aria-label="${label} 삭제" data-balance-rule-type="${type}" data-rule-index="${index}">삭제</button>
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function clearBalanceResultIfInvalid() {
+  if (!balanceAssignments) return;
+
+  const activePlayers = new Set(activeBalancePlayers());
+  const assignedPlayers = Object.values(balanceAssignments)
+    .flat()
+    .filter((row) => row?.player)
+    .map((row) => row.player);
+  const isInvalid =
+    activePlayers.size !== 10 ||
+    assignedPlayers.length !== 10 ||
+    assignedPlayers.some((player) => !activePlayers.has(player));
+
+  if (isInvalid) {
+    balanceAssignments = null;
+    renderBalanceBoard(false);
+  }
+}
+
+function renderBalanceControls() {
+  const players = activeBalancePlayers();
+  const rules = visibleBalanceRulesForPlayers(players);
+  const hasEnoughPlayers = players.length >= 2;
+
+  [
+    balanceSeparateFirst,
+    balanceSeparateSecond,
+    balanceFixedPlayer,
+    balanceExcludedPlayer,
+    ...balanceTogetherSelects
+  ].forEach((select) => {
+    if (!select) return;
+    const previousValue = select.value;
+    select.innerHTML = balanceOptionMarkup(players, previousValue);
+    select.disabled = players.length === 0;
+  });
+
+  if (balanceFixedLane) balanceFixedLane.innerHTML = balanceLaneOptionMarkup(balanceFixedLane.value);
+  if (balanceExcludedLane) balanceExcludedLane.innerHTML = balanceLaneOptionMarkup(balanceExcludedLane.value);
+
+  if (balanceAddTogetherButton) balanceAddTogetherButton.disabled = !hasEnoughPlayers;
+  if (balanceAddSeparateButton) balanceAddSeparateButton.disabled = !hasEnoughPlayers;
+  if (balanceAddFixedButton) balanceAddFixedButton.disabled = players.length === 0;
+  if (balanceAddExcludedButton) balanceAddExcludedButton.disabled = players.length === 0;
+
+  if (balanceTogetherList) balanceTogetherList.innerHTML = balanceRuleListMarkup(rules.together, "together");
+  if (balanceSeparateList) balanceSeparateList.innerHTML = balanceRuleListMarkup(rules.separate, "separate");
+  if (balanceFixedList) balanceFixedList.innerHTML = balanceRuleListMarkup(rules.fixed, "fixed");
+  if (balanceExcludedList) balanceExcludedList.innerHTML = balanceRuleListMarkup(rules.excluded, "excluded");
+  renderBalanceCustomSelects();
+
+  updateBalanceStartButton();
+  clearBalanceResultIfInvalid();
+}
+
+function updateBalanceStartButton() {
+  if (!balanceStartButton) return;
+  balanceStartButton.disabled = activeBalancePlayers().length !== 10;
+}
+
+function addBalanceTogetherRule() {
+  const members = uniqueNames(balanceTogetherSelects.map((select) => select.value));
+  if (members.length < 2 || members.length > 5) {
+    setBalanceStatus("함께 배정은 2명부터 5명까지 선택하세요.");
+    return;
+  }
+
+  const key = groupKey(members);
+  if (balanceRules.together.some((rule) => groupKey(rule.members) === key)) {
+    setBalanceStatus("이미 추가된 함께 배정 구성입니다.");
+    return;
+  }
+
+  const hasSeparateConflict = balanceRules.separate.some(
+    (rule) => members.includes(rule.first) && members.includes(rule.second)
+  );
+  if (hasSeparateConflict) {
+    setBalanceStatus("함께 묶은 플레이어 사이에 상대 팀 조건이 이미 있습니다.");
+    return;
+  }
+
+  balanceRules.together = [...balanceRules.together, { members }];
+  saveBalanceRules();
+  renderBalanceControls();
+  setBalanceStatus(`${members.join(", ")} 함께 배정 조건을 추가했습니다.`);
+}
+
+function addBalancePairRule() {
+  const first = normalizeName(balanceSeparateFirst?.value || "");
+  const second = normalizeName(balanceSeparateSecond?.value || "");
+
+  if (!first || !second || first === second) {
+    setBalanceStatus("서로 다른 두 플레이어를 선택하세요.");
+    return;
+  }
+
+  const key = pairKey(first, second);
+  if (balanceRules.separate.some((rule) => pairKey(rule.first, rule.second) === key)) {
+    setBalanceStatus("이미 추가된 구성입니다.");
+    return;
+  }
+
+  if (balanceRules.together.some((rule) => rule.members.includes(first) && rule.members.includes(second))) {
+    setBalanceStatus("같은 두 플레이어에 반대 조건이 이미 있습니다.");
+    return;
+  }
+
+  balanceRules.separate = [...balanceRules.separate, { first, second }];
+  saveBalanceRules();
+  renderBalanceControls();
+  setBalanceStatus(`${first}, ${second} 상대 팀 배정 조건을 추가했습니다.`);
+}
+
+function addBalanceFixedPosition() {
+  const player = normalizeName(balanceFixedPlayer?.value || "");
+  const lane = getLane(balanceFixedLane?.value)?.key || "";
+
+  if (!player || !lane) {
+    setBalanceStatus("포지션을 고정할 플레이어와 라인을 선택하세요.");
+    return;
+  }
+
+  if (balanceRules.excluded.some((rule) => rule.player === player && rule.lane === lane)) {
+    setBalanceStatus(`${player}에게 ${getLane(lane).label} 제외 조건이 이미 있습니다.`);
+    return;
+  }
+
+  const fixedForLane = visibleBalanceRulesForPlayers(activeBalancePlayers()).fixed.filter(
+    (rule) => rule.lane === lane && rule.player !== player
+  );
+  if (fixedForLane.length >= 2) {
+    setBalanceStatus(`${getLane(lane).label}에는 최대 2명까지만 고정할 수 있습니다.`);
+    return;
+  }
+
+  balanceRules.fixed = [
+    ...balanceRules.fixed.filter((rule) => rule.player !== player),
+    { player, lane }
+  ];
+  saveBalanceRules();
+  renderBalanceControls();
+  setBalanceStatus(`${player}의 포지션을 ${getLane(lane).label}으로 고정했습니다.`);
+}
+
+function addBalanceExcludedPosition() {
+  const player = normalizeName(balanceExcludedPlayer?.value || "");
+  const lane = getLane(balanceExcludedLane?.value)?.key || "";
+
+  if (!player || !lane) {
+    setBalanceStatus("제외할 플레이어와 라인을 선택하세요.");
+    return;
+  }
+
+  if (balanceRules.fixed.some((rule) => rule.player === player && rule.lane === lane)) {
+    setBalanceStatus(`${player}은 ${getLane(lane).label}에 이미 고정되어 있습니다.`);
+    return;
+  }
+
+  if (balanceRules.excluded.some((rule) => rule.player === player && rule.lane === lane)) {
+    setBalanceStatus("이미 추가된 포지션 제외 조건입니다.");
+    return;
+  }
+
+  balanceRules.excluded = [...balanceRules.excluded, { player, lane }];
+  saveBalanceRules();
+  renderBalanceControls();
+  setBalanceStatus(`${player}에게 ${getLane(lane).label} 제외 조건을 추가했습니다.`);
+}
+
+function removeBalanceRule(type, visibleIndex) {
+  const players = activeBalancePlayers();
+  const visibleRules = visibleBalanceRulesForPlayers(players)[type] || [];
+  const target = visibleRules[visibleIndex];
+  if (!target) return;
+
+  if (type === "together") {
+    const key = groupKey(target.members);
+    balanceRules.together = balanceRules.together.filter((rule) => groupKey(rule.members) !== key);
+  } else if (type === "fixed") {
+    balanceRules.fixed = balanceRules.fixed.filter(
+      (rule) => !(rule.player === target.player && rule.lane === target.lane)
+    );
+  } else if (type === "excluded") {
+    balanceRules.excluded = balanceRules.excluded.filter(
+      (rule) => !(rule.player === target.player && rule.lane === target.lane)
+    );
+  } else {
+    const key = pairKey(target.first, target.second);
+    balanceRules[type] = balanceRules[type].filter((rule) => pairKey(rule.first, rule.second) !== key);
+  }
+
+  saveBalanceRules();
+  renderBalanceControls();
+  setBalanceStatus("조건을 삭제했습니다.");
+}
+
+function renameBalancePlayerReferences(oldName, newName) {
+  balanceRules.together = balanceRules.together.map((rule) => ({
+    members: rule.members.map((member) => (member === oldName ? newName : member))
+  }));
+  balanceRules.separate = balanceRules.separate.map((rule) => ({
+    first: rule.first === oldName ? newName : rule.first,
+    second: rule.second === oldName ? newName : rule.second
+  }));
+  balanceRules.fixed = balanceRules.fixed.map((rule) => ({
+    ...rule,
+    player: rule.player === oldName ? newName : rule.player
+  }));
+  balanceRules.excluded = balanceRules.excluded.map((rule) => ({
+    ...rule,
+    player: rule.player === oldName ? newName : rule.player
+  }));
+  balanceRules = sanitizeBalanceRules(balanceRules);
+
+  if (balanceAssignments) {
+    Object.values(balanceAssignments)
+      .flat()
+      .forEach((row) => {
+        if (row.player === oldName) row.player = newName;
+      });
+    updateBalanceAssignmentScores(balanceAssignments);
+  }
+
+  saveBalanceRules();
+}
+
+function deleteBalancePlayerReferences(name) {
+  balanceRules.together = balanceRules.together
+    .map((rule) => ({ members: rule.members.filter((member) => member !== name) }))
+    .filter((rule) => rule.members.length >= 2);
+  balanceRules.separate = balanceRules.separate.filter(
+    (rule) => rule.first !== name && rule.second !== name
+  );
+  balanceRules.fixed = balanceRules.fixed.filter((rule) => rule.player !== name);
+  balanceRules.excluded = balanceRules.excluded.filter((rule) => rule.player !== name);
+  if (balanceAssignments && Object.values(balanceAssignments).flat().some((row) => row.player === name)) {
+    balanceAssignments = null;
+  }
+  balanceRules = sanitizeBalanceRules(balanceRules);
+  saveBalanceRules();
+}
+
+function laneScore(player, laneKey) {
+  return clampScore(scoresForPlayer(player)[laneKey], 50);
+}
+
+function makeDisjointSet(players) {
+  const parent = new Map(players.map((player) => [player, player]));
+
+  const find = (player) => {
+    const current = parent.get(player) || player;
+    if (current === player) return current;
+    const root = find(current);
+    parent.set(player, root);
+    return root;
+  };
+
+  const union = (first, second) => {
+    const firstRoot = find(first);
+    const secondRoot = find(second);
+    if (firstRoot !== secondRoot) parent.set(secondRoot, firstRoot);
+  };
+
+  return { find, union };
+}
+
+function buildBalanceConstraintState(players) {
+  const playerSet = new Set(players);
+  const activeRules = visibleBalanceRulesForPlayers(players);
+  const fixedByPlayer = new Map();
+  const fixedByLane = new Map(lanes.map((lane) => [lane.key, []]));
+  const excludedByPlayer = new Map(players.map((player) => [player, new Set()]));
+
+  activeRules.fixed.forEach((rule) => {
+    fixedByPlayer.set(rule.player, rule.lane);
+    fixedByLane.get(rule.lane).push(rule.player);
+  });
+
+  activeRules.excluded.forEach((rule) => {
+    excludedByPlayer.get(rule.player)?.add(rule.lane);
+  });
+
+  activeRules.fixed.forEach((rule) => {
+    if (excludedByPlayer.get(rule.player)?.has(rule.lane)) {
+      throw new Error(`${rule.player}의 ${getLane(rule.lane).label} 고정과 제외 조건이 충돌합니다.`);
+    }
+  });
+
+  const fixedOverflow = lanes.find((lane) => fixedByLane.get(lane.key).length > 2);
+  if (fixedOverflow) {
+    throw new Error(`${fixedOverflow.label}에 고정된 플레이어가 2명을 초과했습니다.`);
+  }
+
+  const disjointSet = makeDisjointSet(players);
+  activeRules.together.forEach((rule) => {
+    rule.members.slice(1).forEach((member) => disjointSet.union(rule.members[0], member));
+  });
+
+  const componentByPlayer = new Map(players.map((player) => [player, disjointSet.find(player)]));
+  const componentMembers = new Map();
+  players.forEach((player) => {
+    const component = componentByPlayer.get(player);
+    componentMembers.set(component, [...(componentMembers.get(component) || []), player]);
+  });
+
+  const oversizedComponent = [...componentMembers.values()].find((members) => members.length > 5);
+  if (oversizedComponent) {
+    throw new Error(`${oversizedComponent.join(", ")} 구성이 한 팀 최대 인원 5명을 초과합니다.`);
+  }
+
+  activeRules.separate.forEach((rule) => {
+    if (componentByPlayer.get(rule.first) === componentByPlayer.get(rule.second)) {
+      throw new Error(`${rule.first}, ${rule.second}에 서로 충돌하는 팀 조건이 있습니다.`);
+    }
+  });
+
+  componentMembers.forEach((members) => {
+    const fixedLaneSet = new Set();
+    members.forEach((player) => {
+      const fixedLane = fixedByPlayer.get(player);
+      if (!fixedLane) return;
+      if (fixedLaneSet.has(fixedLane)) {
+        throw new Error(`같은 팀 구성 안에서 ${getLane(fixedLane).label} 고정이 중복됩니다.`);
+      }
+      fixedLaneSet.add(fixedLane);
+    });
+  });
+
+  return {
+    playerSet,
+    rules: activeRules,
+    fixedByPlayer,
+    fixedByLane,
+    excludedByPlayer,
+    componentByPlayer
+  };
+}
+
+function buildBalanceLaneGroups(players, constraintState) {
+  const laneGroups = Object.fromEntries(lanes.map((lane) => [lane.key, [...constraintState.fixedByLane.get(lane.key)]]));
+  const remainingPlayers = shuffle(players.filter((player) => !constraintState.fixedByPlayer.has(player)));
+  const componentLaneMap = new Map();
+
+  lanes.forEach((lane) => {
+    laneGroups[lane.key].forEach((player) => {
+      const component = constraintState.componentByPlayer.get(player);
+      componentLaneMap.set(component, new Set([...(componentLaneMap.get(component) || []), lane.key]));
+    });
+  });
+
+  for (const player of remainingPlayers) {
+    const component = constraintState.componentByPlayer.get(player);
+    const componentLanes = componentLaneMap.get(component) || new Set();
+    const excludedLanes = constraintState.excludedByPlayer.get(player) || new Set();
+    const openLaneOptions = lanes
+      .filter(
+        (lane) =>
+          laneGroups[lane.key].length < 2 &&
+          !componentLanes.has(lane.key) &&
+          !excludedLanes.has(lane.key)
+      )
+      .map((lane) => ({
+        lane,
+        weight: Math.max(4, laneScore(player, lane.key) + 8) ** 2 * (0.82 + Math.random() * 0.36)
+      }));
+
+    if (openLaneOptions.length === 0) return null;
+
+    const totalWeight = openLaneOptions.reduce((sum, option) => sum + option.weight, 0);
+    let cursor = Math.random() * totalWeight;
+    const selectedOption =
+      openLaneOptions.find((option) => {
+        cursor -= option.weight;
+        return cursor <= 0;
+      }) || openLaneOptions[openLaneOptions.length - 1];
+
+    laneGroups[selectedOption.lane.key].push(player);
+    componentLaneMap.set(component, new Set([...componentLanes, selectedOption.lane.key]));
+  }
+
+  if (lanes.some((lane) => laneGroups[lane.key].length !== 2)) return null;
+  return laneGroups;
+}
+
+function scoreBalanceSideAssignment(laneGroups, mask, constraintState) {
+  const result = { blue: [], red: [] };
+  const teamByPlayer = new Map();
+  let blueTotal = 0;
+  let redTotal = 0;
+  let laneDiffTotal = 0;
+  let totalFit = 0;
+
+  lanes.forEach((lane, index) => {
+    const lanePlayers = laneGroups[lane.key];
+    const shouldSwap = Boolean(mask & (1 << index));
+    const bluePlayer = shouldSwap ? lanePlayers[1] : lanePlayers[0];
+    const redPlayer = shouldSwap ? lanePlayers[0] : lanePlayers[1];
+    const blueScore = laneScore(bluePlayer, lane.key);
+    const redScore = laneScore(redPlayer, lane.key);
+
+    result.blue.push({ lane: lane.key, player: bluePlayer, score: blueScore });
+    result.red.push({ lane: lane.key, player: redPlayer, score: redScore });
+    teamByPlayer.set(bluePlayer, "blue");
+    teamByPlayer.set(redPlayer, "red");
+    blueTotal += blueScore;
+    redTotal += redScore;
+    laneDiffTotal += Math.abs(blueScore - redScore);
+    totalFit += blueScore + redScore;
+  });
+
+  const hasTogetherViolation = constraintState.rules.together.some(
+    (rule) => rule.members.some((member) => teamByPlayer.get(member) !== teamByPlayer.get(rule.members[0]))
+  );
+  if (hasTogetherViolation) return null;
+
+  const hasSeparateViolation = constraintState.rules.separate.some(
+    (rule) => teamByPlayer.get(rule.first) === teamByPlayer.get(rule.second)
+  );
+  if (hasSeparateViolation) return null;
+
+  const diff = Math.abs(blueTotal - redTotal);
+  const objective = diff * 22 + laneDiffTotal * 1.45 + (1000 - totalFit) * 1.05;
+
+  result.meta = {
+    blueTotal,
+    redTotal,
+    diff,
+    laneDiff: laneDiffTotal,
+    totalFit,
+    objective
+  };
+  return result;
+}
+
+function updateBalanceAssignmentScores(source) {
+  if (!source) return source;
+  let blueTotal = 0;
+  let redTotal = 0;
+  let laneDiffTotal = 0;
+  let totalFit = 0;
+
+  lanes.forEach((lane) => {
+    const blueRow = assignmentFrom(source, "blue", lane.key);
+    const redRow = assignmentFrom(source, "red", lane.key);
+    if (!blueRow || !redRow) return;
+    blueRow.score = laneScore(blueRow.player, lane.key);
+    redRow.score = laneScore(redRow.player, lane.key);
+    blueTotal += blueRow.score;
+    redTotal += redRow.score;
+    laneDiffTotal += Math.abs(blueRow.score - redRow.score);
+    totalFit += blueRow.score + redRow.score;
+  });
+
+  source.meta = {
+    blueTotal,
+    redTotal,
+    diff: Math.abs(blueTotal - redTotal),
+    laneDiff: laneDiffTotal,
+    totalFit,
+    objective: source.meta?.objective || 0
+  };
+  return source;
+}
+
+function createBalancedAssignments() {
+  const players = activeBalancePlayers();
+  if (players.length !== 10) {
+    throw new Error("랜덤 탭의 참가자 명단을 10명으로 맞춘 뒤 시작하세요.");
+  }
+
+  const constraintState = buildBalanceConstraintState(players);
+  let bestAssignment = null;
+  const iterationCount = 14000;
+
+  for (let index = 0; index < iterationCount; index += 1) {
+    const laneGroups = buildBalanceLaneGroups(players, constraintState);
+    if (!laneGroups) continue;
+
+    for (let mask = 0; mask < 32; mask += 1) {
+      const candidate = scoreBalanceSideAssignment(laneGroups, mask, constraintState);
+      if (!candidate) continue;
+      if (!bestAssignment || candidate.meta.objective < bestAssignment.meta.objective) {
+        bestAssignment = candidate;
+      }
+    }
+  }
+
+  if (!bestAssignment) {
+    throw new Error("현재 조건을 모두 만족하는 배정을 찾지 못했습니다. 조건을 줄여 다시 시도하세요.");
+  }
+
+  return updateBalanceAssignmentScores(bestAssignment);
+}
+
+function renderBalanceSummary() {
+  if (!balanceSummary) return;
+
+  if (!balanceAssignments) {
+    balanceSummary.innerHTML = `
+      <strong>점수차 대기</strong>
+      <span>라인차 합계 대기</span>
+      <span>포지션 적합도 대기</span>
+    `;
+    return;
+  }
+
+  const { diff, laneDiff, totalFit } = balanceAssignments.meta;
+  balanceSummary.innerHTML = `
+    <strong>점수차 ${diff}점</strong>
+    <span>라인차 합계 ${laneDiff}점</span>
+    <span>포지션 적합도 ${totalFit}점</span>
+  `;
+}
+
+function balanceCardMarkup(team, lane, row, animated, index) {
+  const scoreText = row ? `${row.score}점` : "대기";
+  const playerText = row ? row.player : "배정 전";
+  const delay = animated ? `style="animation-delay: ${index * 70}ms"` : "";
+  const cardClasses = [
+    "balance-card",
+    team.key,
+    row ? "is-draggable" : "",
+    animated ? "is-dealing" : "",
+    pendingBalanceSwapSlots.has(slotKey(team.key, lane.key)) ? "is-swapping" : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return `
+    <article class="${cardClasses}" ${delay} data-team="${team.key}" data-lane="${lane.key}" data-player="${row ? escapeHtml(row.player) : ""}" aria-label="${team.label} ${lane.label} ${escapeHtml(playerText)} 수동 교체">
+      <span class="balance-card-score">${scoreText}</span>
+      <span class="balance-card-main">
+        <strong>${escapeHtml(playerText)}</strong>
+        <span>${lane.label} 점수</span>
+      </span>
+    </article>
+  `;
+}
+
+function renderBalanceBoard(animated = false) {
+  if (!balanceBoard) return;
+  renderBalanceSummary();
+
+  const renderTeam = (team) => {
+    const total = balanceAssignments?.meta?.[`${team.key}Total`];
+    return `
+    <article class="balance-team-column ${team.key}">
+      <span class="balance-team-total ${team.key}">${Number.isFinite(total) ? `${total}점` : "대기"}</span>
+      <div class="team-title">
+        <h3>${team.label}</h3>
+      </div>
+      <div class="role-list">
+        ${lanes
+          .map((lane, index) =>
+            balanceCardMarkup(team, lane, assignmentFrom(balanceAssignments, team.key, lane.key), animated, index)
+          )
+          .join("")}
+      </div>
+    </article>
+  `;
+  };
+
+  balanceBoard.innerHTML = `
+    ${renderTeam(teams[0])}
+    ${renderBalanceLaneCenterColumn(animated)}
+    ${renderTeam(teams[1])}
+  `;
+}
+
+function renderBalanceLaneCenterColumn(animated = false) {
+  return `
+    <div class="lane-center-list balance-lane-center-list" aria-label="라인별 점수 차이">
+      ${lanes
+        .map((lane, index) => {
+          const blueRow = assignmentFrom(balanceAssignments, "blue", lane.key);
+          const redRow = assignmentFrom(balanceAssignments, "red", lane.key);
+          const diff = blueRow && redRow ? blueRow.score - redRow.score : 0;
+          const leftText = blueRow && redRow ? (diff > 0 ? `+${diff}` : diff === 0 ? "-" : "") : "-";
+          const rightText = blueRow && redRow ? (diff < 0 ? `+${Math.abs(diff)}` : diff === 0 ? "-" : "") : "-";
+          const leftClass = diff > 0 ? "is-leading" : diff === 0 ? "is-even" : "is-empty";
+          const rightClass = diff < 0 ? "is-leading" : diff === 0 ? "is-even" : "is-empty";
+          return `
+          <div class="lane-center-badge balance-lane-diff ${animated ? "is-dealing" : ""}" ${animated ? `style="animation-delay: ${index * 70}ms"` : ""}>
+            <span class="balance-lane-diff-score blue ${leftClass}">${leftText}</span>
+            <strong>${lane.label}</strong>
+            <span class="balance-lane-diff-score red ${rightClass}">${rightText}</span>
+          </div>
+        `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function clearBalanceAssignments() {
+  balanceAssignments = null;
+  renderBalanceBoard(false);
+  setBalanceStatus("밸런스 결과를 초기화했습니다.");
+}
+
+function clearBalanceDragState() {
+  if (!balanceDragState) return;
+  balanceDragState.sourceCard?.classList.remove("is-drag-source");
+  balanceDragState.targetCard?.classList.remove("is-drag-target");
+  balanceDragState.ghost?.remove();
+  document.body.classList.remove("is-balance-dragging");
+  balanceDragState = null;
+}
+
+function updateBalanceDragGhost(event) {
+  if (!balanceDragState) return;
+  const nextX = event.clientX - balanceDragState.offsetX;
+  const nextY = event.clientY - balanceDragState.offsetY;
+  balanceDragState.ghost.style.transform = `translate3d(${nextX}px, ${nextY}px, 0)`;
+}
+
+function updateBalanceDragTarget(event) {
+  if (!balanceDragState) return;
+  const targetCard = document
+    .elementFromPoint(event.clientX, event.clientY)
+    ?.closest(".balance-card.is-draggable");
+  const isValidTarget = Boolean(
+    targetCard &&
+      targetCard !== balanceDragState.sourceCard &&
+      balanceBoard.contains(targetCard) &&
+      assignmentFrom(balanceAssignments, targetCard.dataset.team, targetCard.dataset.lane)
+  );
+  const nextTarget = isValidTarget ? targetCard : null;
+
+  if (balanceDragState.targetCard !== nextTarget) {
+    balanceDragState.targetCard?.classList.remove("is-drag-target");
+    nextTarget?.classList.add("is-drag-target");
+    balanceDragState.targetCard = nextTarget;
+  }
+}
+
+function swapBalanceCards(sourceCard, targetCard) {
+  const sourceRow = assignmentFrom(balanceAssignments, sourceCard.dataset.team, sourceCard.dataset.lane);
+  const targetRow = assignmentFrom(balanceAssignments, targetCard.dataset.team, targetCard.dataset.lane);
+  if (!sourceRow || !targetRow) return false;
+
+  const sourcePlayer = sourceRow.player;
+  sourceRow.player = targetRow.player;
+  targetRow.player = sourcePlayer;
+  updateBalanceAssignmentScores(balanceAssignments);
+
+  pendingBalanceSwapSlots = new Set([
+    slotKey(sourceCard.dataset.team, sourceCard.dataset.lane),
+    slotKey(targetCard.dataset.team, targetCard.dataset.lane)
+  ]);
+  renderBalanceBoard(false);
+  setBalanceStatus(
+    `${sourceRow.player}과 ${targetRow.player}의 위치를 수동으로 맞바꿨습니다. 조건과 관계없이 반영했습니다.`
+  );
+
+  window.setTimeout(() => {
+    pendingBalanceSwapSlots.clear();
+    balanceBoard?.querySelectorAll(".balance-card.is-swapping").forEach((card) => {
+      card.classList.remove("is-swapping");
+    });
+  }, 620);
+
+  return true;
+}
+
+function finishBalanceDrag(event) {
+  if (!balanceDragState) return;
+  document.removeEventListener("pointermove", moveBalanceDrag);
+  document.removeEventListener("pointerup", finishBalanceDrag);
+  document.removeEventListener("pointercancel", cancelBalanceDrag);
+
+  updateBalanceDragTarget(event);
+  const { sourceCard, targetCard, ghost, startRect } = balanceDragState;
+  const dropTarget = targetCard;
+
+  if (dropTarget) {
+    const targetRect = dropTarget.getBoundingClientRect();
+    ghost.style.transition = "transform 220ms cubic-bezier(0.16, 1, 0.3, 1), opacity 220ms ease";
+    ghost.style.transform = `translate3d(${targetRect.left}px, ${targetRect.top}px, 0) scale(0.98)`;
+    ghost.style.opacity = "0.9";
+    window.setTimeout(() => {
+      const sourceName = assignmentFrom(balanceAssignments, sourceCard.dataset.team, sourceCard.dataset.lane)?.player;
+      const targetName = assignmentFrom(balanceAssignments, dropTarget.dataset.team, dropTarget.dataset.lane)?.player;
+      clearBalanceDragState();
+      if (sourceName && targetName) swapBalanceCards(sourceCard, dropTarget);
+    }, 210);
+    return;
+  }
+
+  ghost.style.transition = "transform 180ms cubic-bezier(0.16, 1, 0.3, 1), opacity 180ms ease";
+  ghost.style.transform = `translate3d(${startRect.left}px, ${startRect.top}px, 0)`;
+  ghost.style.opacity = "0";
+  window.setTimeout(clearBalanceDragState, 180);
+}
+
+function moveBalanceDrag(event) {
+  if (!balanceDragState) return;
+  event.preventDefault();
+  updateBalanceDragGhost(event);
+  updateBalanceDragTarget(event);
+}
+
+function cancelBalanceDrag() {
+  if (!balanceDragState) return;
+  document.removeEventListener("pointermove", moveBalanceDrag);
+  document.removeEventListener("pointerup", finishBalanceDrag);
+  document.removeEventListener("pointercancel", cancelBalanceDrag);
+  clearBalanceDragState();
+}
+
+function startBalanceDrag(event) {
+  if (event.button !== 0 || !balanceAssignments) return;
+  const sourceCard = event.target.closest(".balance-card.is-draggable");
+  if (!sourceCard || !balanceBoard?.contains(sourceCard)) return;
+
+  const sourceRow = assignmentFrom(balanceAssignments, sourceCard.dataset.team, sourceCard.dataset.lane);
+  if (!sourceRow) return;
+
+  event.preventDefault();
+  closeBalanceCustomSelects();
+  const rect = sourceCard.getBoundingClientRect();
+  const ghost = sourceCard.cloneNode(true);
+  ghost.classList.remove("is-swapping", "is-drag-target", "is-drag-source");
+  ghost.classList.add("balance-drag-ghost");
+  ghost.style.width = `${rect.width}px`;
+  ghost.style.height = `${rect.height}px`;
+  ghost.style.transform = `translate3d(${rect.left}px, ${rect.top}px, 0)`;
+  document.body.append(ghost);
+
+  sourceCard.classList.add("is-drag-source");
+  document.body.classList.add("is-balance-dragging");
+  balanceDragState = {
+    sourceCard,
+    targetCard: null,
+    ghost,
+    startRect: rect,
+    offsetX: event.clientX - rect.left,
+    offsetY: event.clientY - rect.top
+  };
+
+  document.addEventListener("pointermove", moveBalanceDrag);
+  document.addEventListener("pointerup", finishBalanceDrag);
+  document.addEventListener("pointercancel", cancelBalanceDrag);
+}
+
+function randomizeBalanceDraft() {
+  if (!balanceStartButton) return;
+
+  balanceStartButton.disabled = true;
+  document.body.classList.add("is-randomizing");
+  setBalanceStatus("라인별 실력 점수와 조건을 반영해 조합을 찾고 있습니다.");
+
+  window.setTimeout(() => {
+    try {
+      balanceAssignments = createBalancedAssignments();
+      renderBalanceBoard(true);
+      const { diff } = balanceAssignments.meta;
+      setBalanceStatus(`밸런스 배정 완료. 두 팀 총점 차이는 ${diff}점입니다.`);
+    } catch (error) {
+      balanceAssignments = null;
+      renderBalanceBoard(false);
+      setBalanceStatus(error.message || "밸런스 배정을 완료하지 못했습니다.");
+    } finally {
+      document.body.classList.remove("is-randomizing");
+      updateBalanceStartButton();
+    }
+  }, 90);
 }
 
 function switchPage(pageKey, shouldScroll = true) {
@@ -704,6 +1823,9 @@ function switchPage(pageKey, shouldScroll = true) {
     renderBalanceScores();
     document.querySelector("#settings")?.classList.add("is-visible");
   } else if (pageKey === "balance") {
+    renderBalanceParticipantPool();
+    renderBalanceControls();
+    renderBalanceBoard(false);
     document.querySelector("#balance")?.classList.add("is-visible");
   }
 
@@ -714,14 +1836,17 @@ function switchPage(pageKey, shouldScroll = true) {
 
 function fillPlayers(names) {
   const inputs = [...playerInputs.querySelectorAll("input")];
+  const orderedNames = sortPlayerNames(uniqueNames(names));
   inputs.forEach((input, index) => {
-    input.value = names[index] || "";
+    input.value = orderedNames[index] || "";
   });
   syncSelectedPlayersFromInputs();
   syncPresetPlayersWithInputs();
   updateFilledCount();
   renderPlayerPool();
+  renderBalanceParticipantPool();
   renderBalanceScores();
+  renderBalanceControls();
   if (!assignments) renderEmptyBoard();
 }
 
@@ -745,24 +1870,32 @@ function removePlayerFromInputs(name) {
   });
 }
 
-function togglePlayerFromPool(name) {
+function togglePlayerFromPool(name, source = "random") {
   syncSelectedPlayersFromInputs();
+  let message = "";
 
   if (selectedPlayerNames.has(name)) {
     removePlayerFromInputs(name);
     selectedPlayerNames.delete(name);
-    statusLabel.textContent = `${name}을 참가자 명단에서 제외했습니다.`;
+    message = `${name}을 참가자 명단에서 제외했습니다.`;
   } else if (addPlayerToInput(name)) {
     selectedPlayerNames.add(name);
-    statusLabel.textContent = `${name}을 참가자 명단에 추가했습니다.`;
+    message = `${name}을 참가자 명단에 추가했습니다.`;
   } else {
-    statusLabel.textContent = "참가자 10명이 모두 채워져 있습니다. 한 칸을 비운 뒤 선택하세요.";
+    message = "참가자 10명이 모두 채워져 있습니다. 한 칸을 비운 뒤 선택하세요.";
   }
 
   syncPresetPlayersWithInputs();
   updateFilledCount();
   renderPlayerPool();
+  renderBalanceParticipantPool();
   renderBalanceScores();
+  renderBalanceControls();
+  if (source === "balance") {
+    setBalanceStatus(message);
+  } else {
+    statusLabel.textContent = message;
+  }
   if (!assignments) renderEmptyBoard();
 }
 
@@ -1974,14 +3107,25 @@ function addListener(element, eventName, handler) {
 
 async function initializeApp() {
   await loadDatabaseState();
+  const migratedDefaultScores = applyDefaultScoreProfilesToFlatScores();
+  if (migratedDefaultScores && databaseStorageReady) {
+    defaultPlayerPool.forEach((name) => {
+      lanes.forEach((lane) => {
+        savePlayerScoreToDatabase(name, lane.key, scoresForPlayer(name)[lane.key]);
+      });
+    });
+  }
   createPlayerInputs();
   renderPlayerPool();
+  renderBalanceParticipantPool();
   renderEmptyBoard();
   renderLaneTabs();
   renderChampionPool();
   renderHistory();
   renderSettingsPlayers();
   renderBalanceScores();
+  renderBalanceControls();
+  renderBalanceBoard(false);
   updatePlaySessionButton();
   observeReveal();
   addButtonRipples();
@@ -1994,7 +3138,7 @@ async function initializeApp() {
 initializeApp();
 
 addListener(sampleButton, "click", () => {
-  fillPlayers(playerPoolNames.slice(0, 10));
+  fillPlayers(orderedPlayerPoolNames().slice(0, 10));
   statusLabel.textContent = "기본 명단 10명을 채웠습니다. 바로 랜덤 배정을 시작할 수 있습니다.";
 });
 
@@ -2006,6 +3150,10 @@ addListener(clearButton, "click", () => {
   clearPresetPlayers();
   updateFilledCount();
   renderPlayerPool();
+  renderBalanceParticipantPool();
+  renderBalanceControls();
+  balanceAssignments = null;
+  renderBalanceBoard(false);
   assignments = null;
   lastRecordedSignature = "";
   renderEmptyBoard();
@@ -2037,6 +3185,53 @@ addListener(balanceScoreGrid, "input", (event) => {
 addListener(balanceScoreGrid, "focusout", (event) => {
   const input = event.target.closest(".balance-score-input");
   if (input) settleBalanceScore(input);
+});
+addListener(balanceAddTogetherButton, "click", addBalanceTogetherRule);
+addListener(balanceAddSeparateButton, "click", addBalancePairRule);
+addListener(balanceAddFixedButton, "click", addBalanceFixedPosition);
+addListener(balanceAddExcludedButton, "click", addBalanceExcludedPosition);
+addListener(balanceStartButton, "click", randomizeBalanceDraft);
+addListener(balanceClearButton, "click", clearBalanceAssignments);
+addListener(balanceBoard, "pointerdown", startBalanceDrag);
+[
+  balanceTogetherList,
+  balanceSeparateList,
+  balanceFixedList,
+  balanceExcludedList
+].forEach((list) => {
+  addListener(list, "click", (event) => {
+    const button = event.target.closest("[data-balance-rule-type]");
+    if (!button) return;
+    removeBalanceRule(button.dataset.balanceRuleType, Number(button.dataset.ruleIndex));
+  });
+});
+addListener(document, "click", (event) => {
+  const customSelect = event.target.closest(".balance-custom-select");
+  const trigger = event.target.closest(".balance-select-trigger");
+  const option = event.target.closest(".balance-select-option");
+
+  if (trigger && customSelect) {
+    const willOpen = !customSelect.classList.contains("is-open");
+    closeBalanceCustomSelects(willOpen ? customSelect : null);
+    customSelect.classList.toggle("is-open", willOpen);
+    trigger.setAttribute("aria-expanded", String(willOpen));
+    return;
+  }
+
+  if (option && customSelect) {
+    const select = customSelect.previousElementSibling;
+    if (select?.matches("select")) {
+      select.value = option.dataset.value || "";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      renderBalanceCustomSelect(select);
+    }
+    closeBalanceCustomSelects();
+    return;
+  }
+
+  if (!customSelect) {
+    closeBalanceCustomSelects();
+  }
 });
 
 addListener(teamBoard, "click", (event) => {
@@ -2109,6 +3304,12 @@ addListener(playerPool, "click", (event) => {
   togglePlayerFromPool(chip.dataset.playerName);
 });
 
+addListener(balanceParticipantPool, "click", (event) => {
+  const card = event.target.closest(".balance-participant-card");
+  if (!card) return;
+  togglePlayerFromPool(card.dataset.playerName, "balance");
+});
+
 addListener(addPlayerButton, "click", addNewPlayerName);
 addListener(newPlayerInput, "keydown", (event) => {
   if (event.key !== "Enter") return;
@@ -2164,5 +3365,8 @@ addListener(document, "click", (event) => {
   if (!event.target.closest(".preset-picker")) closePresetMenus();
 });
 addListener(document, "keydown", (event) => {
-  if (event.key === "Escape") closePresetMenus();
+  if (event.key === "Escape") {
+    closePresetMenus();
+    closeBalanceCustomSelects();
+  }
 });
