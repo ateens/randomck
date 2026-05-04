@@ -37,19 +37,45 @@ const defaultPlayerPool = [
   "예지"
 ];
 
-const hasDatabaseConfig = Boolean(
-  process.env.DATABASE_URL || (process.env.PGHOST && process.env.PGDATABASE)
-);
+const databaseUrl =
+  process.env.DATABASE_URL ||
+  process.env.DATABASE_PRIVATE_URL ||
+  process.env.DATABASE_PUBLIC_URL ||
+  process.env.POSTGRES_URL ||
+  "";
 
-const pool = hasDatabaseConfig
-  ? new Pool({
-      connectionString: process.env.DATABASE_URL,
+function databaseConnectionOptions() {
+  if (databaseUrl) {
+    const requiresSsl = process.env.PGSSL === "true" || databaseUrl.includes("sslmode=require");
+    return {
+      connectionString: databaseUrl,
+      ssl: requiresSsl ? { rejectUnauthorized: false } : undefined
+    };
+  }
+
+  if (process.env.PGHOST && process.env.PGDATABASE) {
+    return {
+      host: process.env.PGHOST,
+      port: Number(process.env.PGPORT || 5432),
+      user: process.env.PGUSER,
+      password: process.env.PGPASSWORD,
+      database: process.env.PGDATABASE,
       ssl: process.env.PGSSL === "true" ? { rejectUnauthorized: false } : undefined
-    })
-  : null;
+    };
+  }
+
+  return null;
+}
+
+const connectionOptions = databaseConnectionOptions();
+const hasDatabaseConfig = Boolean(connectionOptions);
+const pool = hasDatabaseConfig ? new Pool(connectionOptions) : null;
 
 let databaseReady = false;
 let databaseInitPromise = null;
+let lastDatabaseError = hasDatabaseConfig
+  ? ""
+  : "No database variables found. Set DATABASE_URL or PGHOST/PGDATABASE on the app service.";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -126,8 +152,12 @@ async function initializeDatabase() {
       )
     `);
 
-    await upsertPlayers(defaultPlayerPool);
+    const playerCount = await pool.query("SELECT COUNT(*)::int AS count FROM players");
+    if (playerCount.rows[0].count === 0) {
+      await upsertPlayers(defaultPlayerPool);
+    }
     databaseReady = true;
+    lastDatabaseError = "";
     return true;
   })();
 
@@ -135,6 +165,7 @@ async function initializeDatabase() {
     return await databaseInitPromise;
   } catch (error) {
     databaseReady = false;
+    lastDatabaseError = error.message || "Database initialization failed.";
     console.error("Database initialization failed:", error);
     return false;
   } finally {
@@ -145,6 +176,26 @@ async function initializeDatabase() {
 async function databaseIsAvailable() {
   const ready = await initializeDatabase();
   return ready;
+}
+
+async function databaseStatus() {
+  const ready = await initializeDatabase();
+  return {
+    storage: ready ? "postgres" : "browser",
+    configured: hasDatabaseConfig,
+    ready,
+    error: ready ? "" : lastDatabaseError,
+    variables: {
+      DATABASE_URL: Boolean(process.env.DATABASE_URL),
+      DATABASE_PRIVATE_URL: Boolean(process.env.DATABASE_PRIVATE_URL),
+      DATABASE_PUBLIC_URL: Boolean(process.env.DATABASE_PUBLIC_URL),
+      POSTGRES_URL: Boolean(process.env.POSTGRES_URL),
+      PGHOST: Boolean(process.env.PGHOST),
+      PGDATABASE: Boolean(process.env.PGDATABASE),
+      PGUSER: Boolean(process.env.PGUSER),
+      PGPASSWORD: Boolean(process.env.PGPASSWORD)
+    }
+  };
 }
 
 async function upsertPlayers(names) {
@@ -235,6 +286,41 @@ async function savePlayerScore(name, laneKey, score) {
   } finally {
     client.release();
   }
+}
+
+async function renamePlayer(oldName, newName) {
+  const normalizedOldName = normalizeName(oldName);
+  const normalizedNewName = normalizeName(newName);
+  if (!normalizedOldName || !normalizedNewName) {
+    const error = new Error("Invalid player rename payload");
+    error.status = 400;
+    throw error;
+  }
+
+  const result = await pool.query(
+    `
+      UPDATE players
+      SET name = $2
+      WHERE name = $1
+      RETURNING id, name
+    `,
+    [normalizedOldName, normalizedNewName]
+  );
+
+  if (result.rowCount === 0) {
+    await upsertPlayers([normalizedNewName]);
+  }
+}
+
+async function deletePlayer(name) {
+  const normalizedName = normalizeName(name);
+  if (!normalizedName) {
+    const error = new Error("Invalid player delete payload");
+    error.status = 400;
+    throw error;
+  }
+
+  await pool.query("DELETE FROM players WHERE name = $1", [normalizedName]);
 }
 
 function formatSessionTime(createdAt) {
@@ -394,10 +480,20 @@ app.get("/health", (_request, response) => {
   response.type("text/plain").send("ok\n");
 });
 
+app.get("/api/db-status", async (_request, response, next) => {
+  try {
+    response.json(await databaseStatus());
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/state", async (_request, response, next) => {
   try {
-    if (!(await databaseIsAvailable())) {
+    const status = await databaseStatus();
+    if (!status.ready) {
       response.json({
+        ...status,
         storage: "browser",
         playerPoolNames: [],
         playerSkillScores: {},
@@ -407,6 +503,7 @@ app.get("/api/state", async (_request, response, next) => {
     }
 
     response.json({
+      ...status,
       storage: "postgres",
       playerPoolNames: await readPlayerPoolNames(),
       playerSkillScores: await readPlayerScores(),
@@ -426,6 +523,34 @@ app.post("/api/players/sync", async (request, response, next) => {
 
     await upsertPlayers(request.body?.names || []);
     response.json({ playerPoolNames: await readPlayerPoolNames() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/players/rename", async (request, response, next) => {
+  try {
+    if (!(await databaseIsAvailable())) {
+      response.json({ storage: "browser", ok: false });
+      return;
+    }
+
+    await renamePlayer(request.body?.oldName, request.body?.newName);
+    response.json({ ok: true, playerPoolNames: await readPlayerPoolNames() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/players/delete", async (request, response, next) => {
+  try {
+    if (!(await databaseIsAvailable())) {
+      response.json({ storage: "browser", ok: false });
+      return;
+    }
+
+    await deletePlayer(request.body?.name);
+    response.json({ ok: true, playerPoolNames: await readPlayerPoolNames() });
   } catch (error) {
     next(error);
   }

@@ -51,6 +51,7 @@ let playerPoolNames = loadPlayerPoolNames();
 let selectedPlayerNames = new Set(playerPoolNames.slice(0, 10));
 let playerSkillScores = loadPlayerSkillScores();
 let databaseStorageReady = false;
+let databaseStatusMessage = "";
 
 const teams = [
   { key: "blue", label: "블루팀" },
@@ -98,6 +99,10 @@ const pageToggleButtons = document.querySelectorAll("[data-page-target]");
 const pageViews = document.querySelectorAll("[data-page-view]");
 const topnav = document.querySelector(".topnav");
 const balanceScoreGrid = document.querySelector("#balanceScoreGrid");
+const settingsNewPlayerInput = document.querySelector("#settingsNewPlayerInput");
+const settingsAddPlayerButton = document.querySelector("#settingsAddPlayerButton");
+const settingsPlayerList = document.querySelector("#settingsPlayerList");
+const settingsStatusLabel = document.querySelector("#settingsStatusLabel");
 
 function championImage(id) {
   return `${CHAMPION_ASSET_BASE}/${id}.png`;
@@ -207,13 +212,13 @@ function loadPlayerPoolNames() {
   }
 }
 
-function savePlayerPoolNames() {
+function savePlayerPoolNames(shouldSync = true) {
   try {
     window.localStorage.setItem(PLAYER_POOL_STORAGE_KEY, JSON.stringify(playerPoolNames));
   } catch {
     // Local storage can be unavailable for file URLs in some browsers.
   }
-  syncPlayerPoolToDatabase();
+  if (shouldSync) syncPlayerPoolToDatabase();
 }
 
 function clampScore(value, fallback = 50) {
@@ -280,6 +285,11 @@ async function loadDatabaseState() {
   try {
     const data = await apiRequest("/api/state", { cache: "no-store" });
     databaseStorageReady = data.storage === "postgres";
+    databaseStatusMessage = databaseStorageReady
+      ? "PostgreSQL 저장소에 연결되었습니다."
+      : data.configured
+        ? `DB 연결 실패로 브라우저 저장으로 동작 중입니다. ${data.error || ""}`.trim()
+        : "DB 연결 변수가 없어 브라우저 저장으로 동작 중입니다.";
     playerPoolNames = uniqueNames([
       ...defaultPlayerPool,
       ...(Array.isArray(data.playerPoolNames) ? data.playerPoolNames : [])
@@ -289,6 +299,7 @@ async function loadDatabaseState() {
     selectedPlayerNames = new Set(playerPoolNames.slice(0, 10));
   } catch {
     databaseStorageReady = false;
+    databaseStatusMessage = "서버 API에 연결할 수 없어 브라우저 저장으로 동작 중입니다.";
   }
 }
 
@@ -315,6 +326,26 @@ function savePlayerScoreToDatabase(name, laneKey, score) {
   apiRequest("/api/player-score", {
     method: "PUT",
     body: JSON.stringify({ name, laneKey, score })
+  }).catch(() => {
+    databaseStorageReady = false;
+  });
+}
+
+function renamePlayerInDatabase(oldName, newName) {
+  if (!databaseStorageReady) return;
+  apiRequest("/api/players/rename", {
+    method: "POST",
+    body: JSON.stringify({ oldName, newName })
+  }).catch(() => {
+    databaseStorageReady = false;
+  });
+}
+
+function deletePlayerFromDatabase(name) {
+  if (!databaseStorageReady) return;
+  apiRequest("/api/players/delete", {
+    method: "POST",
+    body: JSON.stringify({ name })
   }).catch(() => {
     databaseStorageReady = false;
   });
@@ -430,6 +461,139 @@ function renderPlayerPool() {
     .join("");
 }
 
+function setSettingsStatus(message) {
+  if (settingsStatusLabel) settingsStatusLabel.textContent = message;
+}
+
+function renderSettingsPlayers() {
+  if (!settingsPlayerList) return;
+
+  settingsPlayerList.innerHTML = playerPoolNames
+    .map(
+      (name) => `
+        <article class="settings-player-row" data-player-name="${escapeHtml(name)}">
+          <input
+            class="settings-player-name-input"
+            type="text"
+            maxlength="12"
+            value="${escapeHtml(name)}"
+            aria-label="${escapeHtml(name)} 이름 수정"
+          />
+          <button class="mini-button settings-rename-button" type="button" data-action="rename">저장</button>
+          <button class="mini-button settings-delete-button" type="button" data-action="delete">삭제</button>
+        </article>
+      `
+    )
+    .join("");
+}
+
+function rerenderPlayerViews() {
+  syncPresetPlayersWithInputs();
+  updateFilledCount();
+  renderPlayerPool();
+  renderSettingsPlayers();
+  renderBalanceScores();
+  if (!assignments) renderEmptyBoard();
+}
+
+function addPlayerNameToPool(rawName, shouldAddToDraft = false) {
+  const name = normalizeName(rawName);
+  if (!name) return false;
+
+  const isNewPlayer = !playerPoolNames.includes(name);
+  if (isNewPlayer) {
+    playerPoolNames = [...playerPoolNames, name];
+    scoresForPlayer(name);
+    savePlayerPoolNames();
+    savePlayerSkillScores();
+  }
+
+  if (shouldAddToDraft && addPlayerToInput(name)) {
+    selectedPlayerNames.add(name);
+  }
+
+  rerenderPlayerViews();
+  setSettingsStatus(isNewPlayer ? `${name}을 플레이어 풀에 추가했습니다.` : `${name}은 이미 플레이어 풀에 있습니다.`);
+  return true;
+}
+
+function renamePlayerName(oldName, rawNewName) {
+  const newName = normalizeName(rawNewName);
+  if (!oldName || !newName) {
+    setSettingsStatus("이름을 입력하세요.");
+    return false;
+  }
+
+  if (oldName === newName) {
+    setSettingsStatus("변경된 이름이 없습니다.");
+    return false;
+  }
+
+  if (playerPoolNames.includes(newName)) {
+    setSettingsStatus(`${newName}은 이미 존재하는 이름입니다.`);
+    return false;
+  }
+
+  playerPoolNames = playerPoolNames.map((name) => (name === oldName ? newName : name));
+
+  if (selectedPlayerNames.has(oldName)) {
+    selectedPlayerNames.delete(oldName);
+    selectedPlayerNames.add(newName);
+  }
+
+  playerInputs.querySelectorAll("input").forEach((input) => {
+    if (normalizeName(input.value) === oldName) input.value = newName;
+  });
+
+  Object.keys(presetPlayersBySlot).forEach((key) => {
+    if (presetPlayersBySlot[key] === oldName) presetPlayersBySlot[key] = newName;
+  });
+
+  if (assignments) {
+    Object.values(assignments)
+      .flat()
+      .forEach((row) => {
+        if (row.player === oldName) row.player = newName;
+      });
+    renderAssignments(false);
+    updatePlaySessionButton();
+  }
+
+  playerSkillScores[newName] = playerSkillScores[oldName] || defaultPlayerScores();
+  delete playerSkillScores[oldName];
+  savePlayerPoolNames(false);
+  savePlayerSkillScores();
+  renamePlayerInDatabase(oldName, newName);
+  rerenderPlayerViews();
+  setSettingsStatus(`${oldName}을 ${newName}으로 변경했습니다.`);
+  return true;
+}
+
+function deletePlayerName(name) {
+  if (!playerPoolNames.includes(name)) return;
+
+  playerPoolNames = playerPoolNames.filter((playerName) => playerName !== name);
+  selectedPlayerNames.delete(name);
+  removePlayerFromInputs(name);
+  delete playerSkillScores[name];
+
+  Object.keys(presetPlayersBySlot).forEach((key) => {
+    if (presetPlayersBySlot[key] === name) presetPlayersBySlot[key] = "";
+  });
+
+  if (assignments && Object.values(assignments).flat().some((row) => row.player === name)) {
+    assignments = null;
+    lastRecordedSignature = "";
+    updatePlaySessionButton();
+  }
+
+  savePlayerPoolNames(false);
+  savePlayerSkillScores();
+  deletePlayerFromDatabase(name);
+  rerenderPlayerViews();
+  setSettingsStatus(`${name}을 플레이어 풀에서 삭제했습니다.`);
+}
+
 function averageScore(name) {
   const scores = scoresForPlayer(name);
   const total = lanes.reduce((sum, lane) => sum + clampScore(scores[lane.key], 50), 0);
@@ -535,8 +699,11 @@ function switchPage(pageKey, shouldScroll = true) {
   pageSwitch?.setAttribute("data-active-page", pageKey);
   document.body.dataset.activePage = pageKey;
 
-  if (pageKey === "balance") {
+  if (pageKey === "settings") {
+    renderSettingsPlayers();
     renderBalanceScores();
+    document.querySelector("#settings")?.classList.add("is-visible");
+  } else if (pageKey === "balance") {
     document.querySelector("#balance")?.classList.add("is-visible");
   }
 
@@ -603,24 +770,11 @@ function addNewPlayerName() {
   const name = normalizeName(newPlayerInput.value);
   if (!name) return;
 
-  if (!playerPoolNames.includes(name)) {
-    playerPoolNames = [...playerPoolNames, name];
-    savePlayerPoolNames();
-  }
-
-  if (addPlayerToInput(name)) {
-    selectedPlayerNames.add(name);
-    statusLabel.textContent = `${name}을 플레이어 풀과 참가자 명단에 추가했습니다.`;
-  } else {
-    statusLabel.textContent = `${name}을 플레이어 풀에 추가했습니다.`;
-  }
-
+  const addedToDraft = addPlayerNameToPool(name, true);
   newPlayerInput.value = "";
-  syncPresetPlayersWithInputs();
-  updateFilledCount();
-  renderPlayerPool();
-  renderBalanceScores();
-  if (!assignments) renderEmptyBoard();
+  statusLabel.textContent = addedToDraft
+    ? `${name}을 플레이어 풀과 참가자 명단에 추가했습니다.`
+    : `${name}을 플레이어 풀에 추가하지 못했습니다.`;
 }
 
 function clearPresetPlayers() {
@@ -1826,11 +1980,15 @@ async function initializeApp() {
   renderLaneTabs();
   renderChampionPool();
   renderHistory();
+  renderSettingsPlayers();
   renderBalanceScores();
   updatePlaySessionButton();
   observeReveal();
   addButtonRipples();
   setSpeedLabel();
+  if (databaseStatusMessage && window.location.protocol !== "file:") {
+    statusLabel.textContent = databaseStatusMessage;
+  }
 }
 
 initializeApp();
@@ -1956,6 +2114,41 @@ addListener(newPlayerInput, "keydown", (event) => {
   if (event.key !== "Enter") return;
   event.preventDefault();
   addNewPlayerName();
+});
+addListener(settingsAddPlayerButton, "click", () => {
+  if (!settingsNewPlayerInput) return;
+  if (addPlayerNameToPool(settingsNewPlayerInput.value, false)) {
+    settingsNewPlayerInput.value = "";
+  }
+});
+addListener(settingsNewPlayerInput, "keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  if (addPlayerNameToPool(settingsNewPlayerInput.value, false)) {
+    settingsNewPlayerInput.value = "";
+  }
+});
+addListener(settingsPlayerList, "click", (event) => {
+  const button = event.target.closest("button[data-action]");
+  if (!button) return;
+
+  const row = button.closest(".settings-player-row");
+  const oldName = row?.dataset.playerName;
+  if (!oldName) return;
+
+  if (button.dataset.action === "rename") {
+    renamePlayerName(oldName, row.querySelector(".settings-player-name-input")?.value || "");
+  } else if (button.dataset.action === "delete") {
+    deletePlayerName(oldName);
+  }
+});
+addListener(settingsPlayerList, "keydown", (event) => {
+  if (event.key !== "Enter") return;
+  const input = event.target.closest(".settings-player-name-input");
+  if (!input) return;
+  event.preventDefault();
+  const row = input.closest(".settings-player-row");
+  renamePlayerName(row?.dataset.playerName || "", input.value);
 });
 
 addListener(restorePoolButton, "click", restoreActiveLanePool);
