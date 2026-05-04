@@ -8,9 +8,9 @@
       rel="icon"
       href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="10" fill="%23bff2dc"/><text x="32" y="39" font-size="22" text-anchor="middle" font-family="Arial" font-weight="700" fill="%23253043">RD</text></svg>'
     />
-    <link rel="stylesheet" href="styles.css?v=27" />
-    <script defer src="champion-data.js?v=27"></script>
-    <script defer src="script.js?v=27"></script>
+    <link rel="stylesheet" href="styles.css?v=29" />
+    <script defer src="champion-data.js?v=29"></script>
+    <script defer src="script.js?v=29"></script>
   </head>
   <body>
     <div class="page-backdrop" aria-hidden="true">
@@ -23,6 +23,15 @@
         <span class="brand-mark">RD</span>
         <span>내전 랜덤 드래프트</span>
       </a>
+      <div class="page-switch" id="pageSwitch" data-active-page="random" role="group" aria-label="화면 선택">
+        <span class="page-switch-thumb" aria-hidden="true"></span>
+        <button class="page-switch-button is-active" type="button" data-page-target="random" aria-pressed="true">
+          랜덤
+        </button>
+        <button class="page-switch-button" type="button" data-page-target="balance" aria-pressed="false">
+          밸런스
+        </button>
+      </div>
       <nav class="topnav" aria-label="주요 이동">
         <a href="#draft">배정</a>
         <a href="#pool">챔피언 풀</a>
@@ -31,142 +40,157 @@
     </header>
 
     <main>
-      <section id="draft" class="draft-layout">
-        <div class="intro-panel reveal-on-scroll">
-          <h1>세광 랜덤 CK</h1>
-          <p class="intro-copy">
-            참가자 10명을 입력하고 버튼을 누르면 블루팀과 레드팀에 각 라인별
-            담당자와 챔피언이 랜덤으로 배정됩니다. 결과 카드를 클릭하면 해당
-            라인의 챔피언만 다시 뽑을 수 있습니다.
-          </p>
+      <div class="page-view is-active" data-page-view="random">
+        <section id="draft" class="draft-layout">
+          <div class="intro-panel reveal-on-scroll">
+            <h1>세광 랜덤 CK</h1>
+            <p class="intro-copy">
+              참가자 10명을 입력하고 버튼을 누르면 블루팀과 레드팀에 각 라인별
+              담당자와 챔피언이 랜덤으로 배정됩니다. 결과 카드를 클릭하면 해당
+              라인의 챔피언만 다시 뽑을 수 있습니다.
+            </p>
 
-          <div class="control-row">
-            <button class="primary-button" id="randomizeButton" type="button">
-              랜덤 배정 시작
-              <span class="button-glint"></span>
-            </button>
-            <button class="ghost-button" id="sampleButton" type="button">
-              기본 명단 채우기
-            </button>
-            <button class="ghost-button" id="clearButton" type="button">
-              입력 초기화
-            </button>
-          </div>
-
-          <div class="option-strip" aria-label="배정 옵션">
-            <label class="toggle-card">
-              <input id="uniqueChampionToggle" type="checkbox" checked />
-              <span class="toggle-track"></span>
-              <span>
-                <strong>챔피언 중복 방지</strong>
-                <small>두 팀 전체에서 같은 챔피언을 피합니다.</small>
-              </span>
-            </label>
-            <label class="speed-card" for="speedRange">
-              <span>
-                <strong>연출 속도</strong>
-                <small id="speedLabel">보통</small>
-              </span>
-              <input id="speedRange" type="range" min="0" max="2" step="1" value="1" />
-            </label>
-            <label class="toggle-card animation-toggle-card">
-              <input id="animationToggle" type="checkbox" checked />
-              <span class="toggle-track"></span>
-              <span>
-                <strong>애니메이션 활성화</strong>
-              </span>
-            </label>
-            <label class="toggle-card">
-              <input id="fearlessToggle" type="checkbox" />
-              <span class="toggle-track"></span>
-              <span>
-                <strong>피어리스 적용</strong>
-                <small>세션 기록에 사용된 챔피언을 다음 배정에서 제외합니다.</small>
-              </span>
-            </label>
-            <button class="session-reset-button" id="resetSessionButton" type="button">
-              세션 초기화
-            </button>
-          </div>
-
-          <div class="status-card" aria-live="polite">
-            <span class="status-dot"></span>
-            <span id="statusLabel">대기 중입니다. 참가자 이름을 확인한 뒤 시작하세요.</span>
-          </div>
-        </div>
-
-        <section class="players-panel reveal-on-scroll" aria-labelledby="playersTitle">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">참가자 명단</p>
-              <h2 id="playersTitle">10명 입력</h2>
+            <div class="control-row">
+              <button class="primary-button" id="randomizeButton" type="button">
+                랜덤 배정 시작
+                <span class="button-glint"></span>
+              </button>
+              <button class="ghost-button" id="sampleButton" type="button">
+                기본 명단 채우기
+              </button>
+              <button class="ghost-button" id="clearButton" type="button">
+                입력 초기화
+              </button>
             </div>
-            <span class="count-badge"><span id="filledCount">0</span>/10</span>
-          </div>
-          <div class="player-grid" id="playerInputs"></div>
-          <div class="player-pool-panel" aria-labelledby="playerPoolTitle">
-            <div class="player-pool-heading">
-              <h3 id="playerPoolTitle">플레이어 풀</h3>
-              <span class="player-pool-count" id="selectedPlayerCount" aria-live="polite"></span>
+
+            <div class="option-strip" aria-label="배정 옵션">
+              <label class="toggle-card">
+                <input id="uniqueChampionToggle" type="checkbox" checked />
+                <span class="toggle-track"></span>
+                <span>
+                  <strong>챔피언 중복 방지</strong>
+                  <small>두 팀 전체에서 같은 챔피언을 피합니다.</small>
+                </span>
+              </label>
+              <label class="speed-card" for="speedRange">
+                <span>
+                  <strong>연출 속도</strong>
+                  <small id="speedLabel">보통</small>
+                </span>
+                <input id="speedRange" type="range" min="0" max="2" step="1" value="1" />
+              </label>
+              <label class="toggle-card animation-toggle-card">
+                <input id="animationToggle" type="checkbox" checked />
+                <span class="toggle-track"></span>
+                <span>
+                  <strong>애니메이션 활성화</strong>
+                </span>
+              </label>
+              <label class="toggle-card">
+                <input id="fearlessToggle" type="checkbox" />
+                <span class="toggle-track"></span>
+                <span>
+                  <strong>피어리스 적용</strong>
+                  <small>세션 기록에 사용된 챔피언을 다음 배정에서 제외합니다.</small>
+                </span>
+              </label>
+              <button class="session-reset-button" id="resetSessionButton" type="button">
+                세션 초기화
+              </button>
             </div>
-            <div class="player-pool-actions">
-              <input
-                id="newPlayerInput"
-                type="text"
-                maxlength="12"
-                placeholder="새 이름 추가"
-                autocomplete="off"
-              />
-              <button class="mini-button" id="addPlayerButton" type="button">추가</button>
+
+            <div class="status-card" aria-live="polite">
+              <span class="status-dot"></span>
+              <span id="statusLabel">대기 중입니다. 참가자 이름을 확인한 뒤 시작하세요.</span>
             </div>
-            <div class="player-pool" id="playerPool"></div>
           </div>
+
+          <section class="players-panel reveal-on-scroll" aria-labelledby="playersTitle">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">참가자 명단</p>
+                <h2 id="playersTitle">10명 입력</h2>
+              </div>
+              <span class="count-badge"><span id="filledCount">0</span>/10</span>
+            </div>
+            <div class="player-grid" id="playerInputs"></div>
+            <div class="player-pool-panel" aria-labelledby="playerPoolTitle">
+              <div class="player-pool-heading">
+                <h3 id="playerPoolTitle">플레이어 풀</h3>
+                <span class="player-pool-count" id="selectedPlayerCount" aria-live="polite"></span>
+              </div>
+              <div class="player-pool-actions">
+                <input
+                  id="newPlayerInput"
+                  type="text"
+                  maxlength="12"
+                  placeholder="새 이름 추가"
+                  autocomplete="off"
+                />
+                <button class="mini-button" id="addPlayerButton" type="button">추가</button>
+              </div>
+              <div class="player-pool" id="playerPool"></div>
+            </div>
+          </section>
+
+          <section class="board-panel reveal-on-scroll" aria-labelledby="boardTitle">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">랜덤 결과</p>
+                <h2 id="boardTitle">팀 배정 보드</h2>
+              </div>
+              <button class="play-session-button" id="playSessionButton" type="button" disabled>
+                플레이
+              </button>
+            </div>
+            <div class="team-board" id="teamBoard"></div>
+          </section>
         </section>
 
-        <section class="board-panel reveal-on-scroll" aria-labelledby="boardTitle">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">랜덤 결과</p>
-              <h2 id="boardTitle">팀 배정 보드</h2>
+        <section id="pool" class="pool-section reveal-on-scroll" aria-labelledby="poolTitle">
+          <div class="section-heading">
+            <p class="eyebrow">라인별 후보</p>
+            <h2 id="poolTitle">챔피언 풀 선택</h2>
+            <p>
+              LOL.PS 26.08 라인별 티어리스트에서 지표가 있는 챔피언을 기본 선택했습니다.
+              탭을 고른 뒤 챔피언을 클릭해 해당 라인의 랜덤 후보를 조정하세요.
+            </p>
+          </div>
+          <div class="pool-toolbar">
+            <div class="lane-tabs" id="laneTabs" role="tablist" aria-label="라인 선택"></div>
+            <div class="pool-tools">
+              <span class="pool-count" id="poolCount" aria-live="polite"></span>
+              <button class="mini-button" id="restorePoolButton" type="button">LOL.PS 기본값</button>
+              <button class="mini-button" id="selectAllPoolButton" type="button">전체 선택</button>
             </div>
-            <button class="play-session-button" id="playSessionButton" type="button" disabled>
-              플레이
-            </button>
           </div>
-          <div class="team-board" id="teamBoard"></div>
+          <div class="champion-pool" id="championPool"></div>
         </section>
-      </section>
 
-      <section id="pool" class="pool-section reveal-on-scroll" aria-labelledby="poolTitle">
-        <div class="section-heading">
-          <p class="eyebrow">라인별 후보</p>
-          <h2 id="poolTitle">챔피언 풀 선택</h2>
-          <p>
-            LOL.PS 26.08 라인별 티어리스트에서 지표가 있는 챔피언을 기본 선택했습니다.
-            탭을 고른 뒤 챔피언을 클릭해 해당 라인의 랜덤 후보를 조정하세요.
-          </p>
-        </div>
-        <div class="pool-toolbar">
-          <div class="lane-tabs" id="laneTabs" role="tablist" aria-label="라인 선택"></div>
-          <div class="pool-tools">
-            <span class="pool-count" id="poolCount" aria-live="polite"></span>
-            <button class="mini-button" id="restorePoolButton" type="button">LOL.PS 기본값</button>
-            <button class="mini-button" id="selectAllPoolButton" type="button">전체 선택</button>
+        <section id="history" class="history-section reveal-on-scroll" aria-labelledby="historyTitle">
+          <div class="section-heading">
+            <p class="eyebrow">최근 결과</p>
+            <h2 id="historyTitle">이번 세션 기록</h2>
+            <p>플레이 버튼을 눌러 확정한 경기만 세션 기록과 피어리스 룰에 반영됩니다.</p>
           </div>
-        </div>
-        <div class="champion-pool" id="championPool"></div>
-      </section>
+          <div class="history-list" id="historyList">
+            <p class="empty-history">아직 플레이 기록이 없습니다.</p>
+          </div>
+        </section>
+      </div>
 
-      <section id="history" class="history-section reveal-on-scroll" aria-labelledby="historyTitle">
-        <div class="section-heading">
-          <p class="eyebrow">최근 결과</p>
-          <h2 id="historyTitle">이번 세션 기록</h2>
-          <p>플레이 버튼을 눌러 확정한 경기만 세션 기록과 피어리스 룰에 반영됩니다.</p>
-        </div>
-        <div class="history-list" id="historyList">
-          <p class="empty-history">아직 플레이 기록이 없습니다.</p>
-        </div>
-      </section>
+      <div class="page-view" data-page-view="balance" aria-hidden="true">
+        <section id="balance" class="balance-section reveal-on-scroll" aria-labelledby="balanceTitle">
+          <div class="section-heading">
+            <p class="eyebrow">플레이어 밸런스</p>
+            <h2 id="balanceTitle">라인별 실력 점수</h2>
+            <p>플레이어 풀 전체를 기준으로 각 라인 실력 점수를 0부터 100까지 입력합니다.</p>
+          </div>
+          <div class="balance-score-board" aria-label="라인별 실력 점수 입력">
+            <div class="balance-score-grid" id="balanceScoreGrid"></div>
+          </div>
+        </section>
+      </div>
     </main>
 
     <footer class="footer">

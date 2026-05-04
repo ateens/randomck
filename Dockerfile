@@ -1,9 +1,16 @@
-FROM nginx:1.27-alpine
+FROM node:22-alpine
 
+WORKDIR /app
+
+ENV NODE_ENV=production
 ENV PORT=8080
 
-COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
-COPY index.html styles.css script.js champion-data.js /usr/share/nginx/html/
-COPY assets /usr/share/nginx/html/assets
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+COPY server.js index.html styles.css script.js champion-data.js ./
+COPY assets ./assets
 
 EXPOSE 8080
+
+CMD ["npm", "start"]

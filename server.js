@@ -1,0 +1,514 @@
+import express from "express";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import pg from "pg";
+
+const { Pool } = pg;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const port = Number(process.env.PORT || 8080);
+
+const lanes = [
+  { key: "top", label: "탑" },
+  { key: "jungle", label: "정글" },
+  { key: "mid", label: "미드" },
+  { key: "bot", label: "원딜" },
+  { key: "support", label: "서포터" }
+];
+
+const defaultPlayerPool = [
+  "상현",
+  "지안",
+  "지혜",
+  "지상",
+  "예진",
+  "예완",
+  "성원",
+  "강산",
+  "강희",
+  "은우",
+  "태영(김)",
+  "태영(윤)",
+  "선진",
+  "재윤",
+  "동근",
+  "승헌",
+  "인의",
+  "예지"
+];
+
+const hasDatabaseConfig = Boolean(
+  process.env.DATABASE_URL || (process.env.PGHOST && process.env.PGDATABASE)
+);
+
+const pool = hasDatabaseConfig
+  ? new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.PGSSL === "true" ? { rejectUnauthorized: false } : undefined
+    })
+  : null;
+
+let databaseReady = false;
+let databaseInitPromise = null;
+
+const app = express();
+app.use(express.json({ limit: "1mb" }));
+
+function normalizeName(name) {
+  return String(name || "").trim().replace(/\s+/g, " ");
+}
+
+function uniqueNames(names) {
+  const seen = new Set();
+  return names
+    .map(normalizeName)
+    .filter((name) => {
+      if (!name || seen.has(name)) return false;
+      seen.add(name);
+      return true;
+    });
+}
+
+function clampScore(value) {
+  const score = Number(value);
+  if (!Number.isFinite(score)) return 50;
+  return Math.min(100, Math.max(0, Math.round(score)));
+}
+
+function isLaneKey(value) {
+  return lanes.some((lane) => lane.key === value);
+}
+
+async function initializeDatabase() {
+  if (!pool) return false;
+  if (databaseReady) return true;
+  if (databaseInitPromise) return databaseInitPromise;
+
+  databaseInitPromise = (async () => {
+    await pool.query("SELECT 1");
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS players (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS player_lane_scores (
+        player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+        lane_key TEXT NOT NULL,
+        score INTEGER NOT NULL DEFAULT 50 CHECK (score >= 0 AND score <= 100),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (player_id, lane_key)
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS session_records (
+        id BIGSERIAL PRIMARY KEY,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS session_lane_records (
+        session_id BIGINT NOT NULL REFERENCES session_records(id) ON DELETE CASCADE,
+        lane_key TEXT NOT NULL,
+        lane_label TEXT NOT NULL,
+        blue_player TEXT NOT NULL,
+        blue_champion_id TEXT NOT NULL,
+        blue_champion_name TEXT NOT NULL,
+        blue_champion_image TEXT NOT NULL,
+        red_player TEXT NOT NULL,
+        red_champion_id TEXT NOT NULL,
+        red_champion_name TEXT NOT NULL,
+        red_champion_image TEXT NOT NULL,
+        PRIMARY KEY (session_id, lane_key)
+      )
+    `);
+
+    await upsertPlayers(defaultPlayerPool);
+    databaseReady = true;
+    return true;
+  })();
+
+  try {
+    return await databaseInitPromise;
+  } catch (error) {
+    databaseReady = false;
+    console.error("Database initialization failed:", error);
+    return false;
+  } finally {
+    databaseInitPromise = null;
+  }
+}
+
+async function databaseIsAvailable() {
+  const ready = await initializeDatabase();
+  return ready;
+}
+
+async function upsertPlayers(names) {
+  const cleanNames = uniqueNames(names);
+  if (cleanNames.length === 0) return;
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    for (const [index, name] of cleanNames.entries()) {
+      await client.query(
+        `
+          INSERT INTO players (name, sort_order)
+          VALUES ($1, $2)
+          ON CONFLICT (name)
+          DO UPDATE SET sort_order = LEAST(players.sort_order, EXCLUDED.sort_order)
+        `,
+        [name, index]
+      );
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function readPlayerPoolNames() {
+  const result = await pool.query(`
+    SELECT name
+    FROM players
+    ORDER BY sort_order ASC, id ASC
+  `);
+  return result.rows.map((row) => row.name);
+}
+
+async function readPlayerScores() {
+  const result = await pool.query(`
+    SELECT p.name, s.lane_key, s.score
+    FROM player_lane_scores s
+    JOIN players p ON p.id = s.player_id
+    ORDER BY p.sort_order ASC, p.id ASC
+  `);
+  const scores = {};
+  result.rows.forEach((row) => {
+    scores[row.name] = scores[row.name] || {};
+    scores[row.name][row.lane_key] = clampScore(row.score);
+  });
+  return scores;
+}
+
+async function savePlayerScore(name, laneKey, score) {
+  const normalizedName = normalizeName(name);
+  if (!normalizedName || !isLaneKey(laneKey)) {
+    const error = new Error("Invalid player score payload");
+    error.status = 400;
+    throw error;
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const playerResult = await client.query(
+      `
+        INSERT INTO players (name, sort_order)
+        VALUES ($1, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM players))
+        ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+        RETURNING id
+      `,
+      [normalizedName]
+    );
+    const playerId = playerResult.rows[0].id;
+    await client.query(
+      `
+        INSERT INTO player_lane_scores (player_id, lane_key, score, updated_at)
+        VALUES ($1, $2, $3, NOW())
+        ON CONFLICT (player_id, lane_key)
+        DO UPDATE SET score = EXCLUDED.score, updated_at = NOW()
+      `,
+      [playerId, laneKey, clampScore(score)]
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+function formatSessionTime(createdAt) {
+  return new Intl.DateTimeFormat("ko-KR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZone: "Asia/Seoul"
+  }).format(new Date(createdAt));
+}
+
+async function readSessionRecords() {
+  const result = await pool.query(`
+    SELECT
+      sr.id,
+      sr.created_at,
+      slr.lane_key,
+      slr.lane_label,
+      slr.blue_player,
+      slr.blue_champion_id,
+      slr.blue_champion_name,
+      slr.blue_champion_image,
+      slr.red_player,
+      slr.red_champion_id,
+      slr.red_champion_name,
+      slr.red_champion_image
+    FROM session_records sr
+    JOIN session_lane_records slr ON slr.session_id = sr.id
+    ORDER BY sr.created_at DESC, sr.id DESC
+  `);
+
+  const recordsById = new Map();
+  result.rows.forEach((row) => {
+    if (!recordsById.has(row.id)) {
+      recordsById.set(row.id, {
+        id: String(row.id),
+        time: formatSessionTime(row.created_at),
+        lanes: []
+      });
+    }
+
+    recordsById.get(row.id).lanes.push({
+      key: row.lane_key,
+      label: row.lane_label,
+      blue: {
+        player: row.blue_player,
+        champion: {
+          id: row.blue_champion_id,
+          name: row.blue_champion_name,
+          image: row.blue_champion_image
+        }
+      },
+      red: {
+        player: row.red_player,
+        champion: {
+          id: row.red_champion_id,
+          name: row.red_champion_name,
+          image: row.red_champion_image
+        }
+      }
+    });
+  });
+
+  return [...recordsById.values()].map((record) => ({
+    ...record,
+    lanes: lanes
+      .map((lane) => record.lanes.find((laneRecord) => laneRecord.key === lane.key))
+      .filter(Boolean)
+  }));
+}
+
+function sanitizeSessionLane(laneRecord) {
+  const lane = lanes.find((item) => item.key === laneRecord?.key);
+  if (!lane || !laneRecord?.blue?.champion || !laneRecord?.red?.champion) {
+    const error = new Error("Invalid session lane payload");
+    error.status = 400;
+    throw error;
+  }
+
+  return {
+    key: lane.key,
+    label: lane.label,
+    blue: {
+      player: normalizeName(laneRecord.blue.player),
+      champion: laneRecord.blue.champion
+    },
+    red: {
+      player: normalizeName(laneRecord.red.player),
+      champion: laneRecord.red.champion
+    }
+  };
+}
+
+async function saveSessionRecord(laneRecords) {
+  const cleanLaneRecords = lanes.map((lane) => {
+    const laneRecord = laneRecords.find((item) => item?.key === lane.key);
+    return sanitizeSessionLane(laneRecord);
+  });
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const sessionResult = await client.query(
+      "INSERT INTO session_records DEFAULT VALUES RETURNING id, created_at"
+    );
+    const session = sessionResult.rows[0];
+
+    for (const laneRecord of cleanLaneRecords) {
+      await client.query(
+        `
+          INSERT INTO session_lane_records (
+            session_id,
+            lane_key,
+            lane_label,
+            blue_player,
+            blue_champion_id,
+            blue_champion_name,
+            blue_champion_image,
+            red_player,
+            red_champion_id,
+            red_champion_name,
+            red_champion_image
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        `,
+        [
+          session.id,
+          laneRecord.key,
+          laneRecord.label,
+          laneRecord.blue.player,
+          String(laneRecord.blue.champion.id),
+          String(laneRecord.blue.champion.name),
+          String(laneRecord.blue.champion.image),
+          laneRecord.red.player,
+          String(laneRecord.red.champion.id),
+          String(laneRecord.red.champion.name),
+          String(laneRecord.red.champion.image)
+        ]
+      );
+    }
+
+    await client.query("COMMIT");
+    return {
+      id: String(session.id),
+      time: formatSessionTime(session.created_at),
+      lanes: cleanLaneRecords
+    };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+app.get("/health", (_request, response) => {
+  response.type("text/plain").send("ok\n");
+});
+
+app.get("/api/state", async (_request, response, next) => {
+  try {
+    if (!(await databaseIsAvailable())) {
+      response.json({
+        storage: "browser",
+        playerPoolNames: [],
+        playerSkillScores: {},
+        sessionRecords: []
+      });
+      return;
+    }
+
+    response.json({
+      storage: "postgres",
+      playerPoolNames: await readPlayerPoolNames(),
+      playerSkillScores: await readPlayerScores(),
+      sessionRecords: await readSessionRecords()
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/players/sync", async (request, response, next) => {
+  try {
+    if (!(await databaseIsAvailable())) {
+      response.json({ storage: "browser", ok: false });
+      return;
+    }
+
+    await upsertPlayers(request.body?.names || []);
+    response.json({ playerPoolNames: await readPlayerPoolNames() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/player-score", async (request, response, next) => {
+  try {
+    if (!(await databaseIsAvailable())) {
+      response.json({ storage: "browser", ok: false });
+      return;
+    }
+
+    await savePlayerScore(request.body?.name, request.body?.laneKey, request.body?.score);
+    response.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/session-records", async (request, response, next) => {
+  try {
+    if (!(await databaseIsAvailable())) {
+      response.json({ storage: "browser", ok: false });
+      return;
+    }
+
+    const record = await saveSessionRecord(request.body?.lanes || []);
+    response.status(201).json({ record });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/session-records", async (_request, response, next) => {
+  try {
+    if (!(await databaseIsAvailable())) {
+      response.json({ storage: "browser", ok: false });
+      return;
+    }
+
+    await pool.query("DELETE FROM session_records");
+    response.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.use(express.static(__dirname, {
+  etag: true,
+  maxAge: "1h",
+  setHeaders(response, filePath) {
+    if (filePath.endsWith(".html")) {
+      response.setHeader("Cache-Control", "no-cache");
+    }
+  }
+}));
+
+app.use((request, response, next) => {
+  if (request.path.startsWith("/api/")) {
+    response.status(404).json({ error: "not_found" });
+    return;
+  }
+  next();
+});
+
+app.get("*", (_request, response) => {
+  response.sendFile(path.join(__dirname, "index.html"));
+});
+
+app.use((error, _request, response, _next) => {
+  console.error(error);
+  response.status(error.status || 500).json({
+    error: error.status ? "bad_request" : "server_error",
+    message: error.message || "Unexpected server error"
+  });
+});
+
+initializeDatabase().then((ready) => {
+  if (!ready) {
+    console.warn("PostgreSQL is not ready. Static app will run with browser fallback storage.");
+  }
+});
+
+app.listen(port, () => {
+  console.log(`randomCK server listening on ${port}`);
+});

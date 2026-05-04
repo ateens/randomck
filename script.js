@@ -26,6 +26,7 @@ const selectedChampionIdsByLane = Object.fromEntries(
 );
 
 const PLAYER_POOL_STORAGE_KEY = "sekwangRandomCKPlayerPool";
+const PLAYER_SCORE_STORAGE_KEY = "sekwangRandomCKPlayerScores";
 const defaultPlayerPool = [
   "상현",
   "지안",
@@ -48,6 +49,8 @@ const defaultPlayerPool = [
 ];
 let playerPoolNames = loadPlayerPoolNames();
 let selectedPlayerNames = new Set(playerPoolNames.slice(0, 10));
+let playerSkillScores = loadPlayerSkillScores();
+let databaseStorageReady = false;
 
 const teams = [
   { key: "blue", label: "블루팀" },
@@ -90,6 +93,11 @@ const restorePoolButton = document.querySelector("#restorePoolButton");
 const selectAllPoolButton = document.querySelector("#selectAllPoolButton");
 const historyList = document.querySelector("#historyList");
 const playSessionButton = document.querySelector("#playSessionButton");
+const pageSwitch = document.querySelector("#pageSwitch");
+const pageToggleButtons = document.querySelectorAll("[data-page-target]");
+const pageViews = document.querySelectorAll("[data-page-view]");
+const topnav = document.querySelector(".topnav");
+const balanceScoreGrid = document.querySelector("#balanceScoreGrid");
 
 function championImage(id) {
   return `${CHAMPION_ASSET_BASE}/${id}.png`;
@@ -205,6 +213,139 @@ function savePlayerPoolNames() {
   } catch {
     // Local storage can be unavailable for file URLs in some browsers.
   }
+  syncPlayerPoolToDatabase();
+}
+
+function clampScore(value, fallback = 50) {
+  const score = Number(value);
+  if (!Number.isFinite(score)) return fallback;
+  return Math.min(100, Math.max(0, Math.round(score)));
+}
+
+function defaultPlayerScores() {
+  return Object.fromEntries(lanes.map((lane) => [lane.key, 50]));
+}
+
+function sanitizePlayerScores(rawScores = {}) {
+  return Object.fromEntries(
+    lanes.map((lane) => [lane.key, clampScore(rawScores[lane.key], 50)])
+  );
+}
+
+function loadPlayerSkillScores() {
+  try {
+    const storedScores = JSON.parse(window.localStorage.getItem(PLAYER_SCORE_STORAGE_KEY) || "{}");
+    if (!storedScores || typeof storedScores !== "object" || Array.isArray(storedScores)) {
+      return {};
+    }
+
+    return Object.fromEntries(
+      Object.entries(storedScores).map(([name, scores]) => [
+        normalizeName(name),
+        sanitizePlayerScores(scores)
+      ])
+    );
+  } catch {
+    return {};
+  }
+}
+
+function savePlayerSkillScores() {
+  try {
+    window.localStorage.setItem(PLAYER_SCORE_STORAGE_KEY, JSON.stringify(playerSkillScores));
+  } catch {
+    // Local storage can be unavailable for file URLs in some browsers.
+  }
+}
+
+async function apiRequest(path, options = {}) {
+  const response = await fetch(path, {
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {})
+    },
+    ...options
+  });
+
+  if (!response.ok) {
+    const error = new Error(`API request failed: ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+
+  return response.status === 204 ? null : response.json();
+}
+
+async function loadDatabaseState() {
+  try {
+    const data = await apiRequest("/api/state", { cache: "no-store" });
+    databaseStorageReady = data.storage === "postgres";
+    playerPoolNames = uniqueNames([
+      ...defaultPlayerPool,
+      ...(Array.isArray(data.playerPoolNames) ? data.playerPoolNames : [])
+    ]);
+    playerSkillScores = sanitizeSkillScoreMap(data.playerSkillScores || {});
+    sessionRecords = Array.isArray(data.sessionRecords) ? data.sessionRecords : [];
+    selectedPlayerNames = new Set(playerPoolNames.slice(0, 10));
+  } catch {
+    databaseStorageReady = false;
+  }
+}
+
+function sanitizeSkillScoreMap(rawScores = {}) {
+  return Object.fromEntries(
+    Object.entries(rawScores)
+      .map(([name, scores]) => [normalizeName(name), sanitizePlayerScores(scores)])
+      .filter(([name]) => Boolean(name))
+  );
+}
+
+function syncPlayerPoolToDatabase() {
+  if (!databaseStorageReady) return;
+  apiRequest("/api/players/sync", {
+    method: "POST",
+    body: JSON.stringify({ names: playerPoolNames })
+  }).catch(() => {
+    databaseStorageReady = false;
+  });
+}
+
+function savePlayerScoreToDatabase(name, laneKey, score) {
+  if (!databaseStorageReady) return;
+  apiRequest("/api/player-score", {
+    method: "PUT",
+    body: JSON.stringify({ name, laneKey, score })
+  }).catch(() => {
+    databaseStorageReady = false;
+  });
+}
+
+async function saveSessionRecordToDatabase(record) {
+  if (!databaseStorageReady) return null;
+  try {
+    const data = await apiRequest("/api/session-records", {
+      method: "POST",
+      body: JSON.stringify({ lanes: record.lanes })
+    });
+    return data.record || null;
+  } catch {
+    databaseStorageReady = false;
+    return null;
+  }
+}
+
+function resetSessionRecordsInDatabase() {
+  if (!databaseStorageReady) return;
+  apiRequest("/api/session-records", { method: "DELETE" }).catch(() => {
+    databaseStorageReady = false;
+  });
+}
+
+function scoresForPlayer(name) {
+  if (!playerSkillScores[name]) {
+    playerSkillScores[name] = defaultPlayerScores();
+  }
+  return playerSkillScores[name];
 }
 
 function escapeHtml(value) {
@@ -246,6 +387,7 @@ function handlePlayerInputChange() {
   syncPresetPlayersWithInputs();
   updateFilledCount();
   renderPlayerPool();
+  renderBalanceScores();
   if (!assignments) renderEmptyBoard();
 }
 
@@ -288,6 +430,121 @@ function renderPlayerPool() {
     .join("");
 }
 
+function averageScore(name) {
+  const scores = scoresForPlayer(name);
+  const total = lanes.reduce((sum, lane) => sum + clampScore(scores[lane.key], 50), 0);
+  return Math.round(total / lanes.length);
+}
+
+function renderBalanceScores() {
+  if (!balanceScoreGrid) return;
+
+  balanceScoreGrid.innerHTML = `
+    <div class="balance-score-head" role="row">
+      <span>플레이어</span>
+      ${lanes.map((lane) => `<span>${lane.label}</span>`).join("")}
+      <span>평균</span>
+    </div>
+    ${playerPoolNames
+      .map((name) => {
+        const scores = scoresForPlayer(name);
+        return `
+          <article class="balance-player-row" data-player-name="${escapeHtml(name)}">
+            <div class="balance-player-name">${escapeHtml(name)}</div>
+            ${lanes
+              .map(
+                (lane) => `
+                <label class="balance-score-field">
+                  <span>${lane.label}</span>
+                  <input
+                    class="balance-score-input"
+                    type="number"
+                    inputmode="numeric"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value="${clampScore(scores[lane.key], 50)}"
+                    data-player-name="${escapeHtml(name)}"
+                    data-lane="${lane.key}"
+                    aria-label="${escapeHtml(name)} ${lane.label} 점수"
+                  />
+                </label>
+              `
+              )
+              .join("")}
+            <div class="balance-average" aria-label="${escapeHtml(name)} 평균 점수">
+              <span class="balance-average-value">${averageScore(name)}</span>
+            </div>
+          </article>
+        `;
+      })
+      .join("")}
+  `;
+}
+
+function updateBalanceAverage(name) {
+  const row = [...(balanceScoreGrid?.querySelectorAll(".balance-player-row") || [])].find(
+    (item) => item.dataset.playerName === name
+  );
+  const average = row?.querySelector(".balance-average-value");
+  if (average) average.textContent = averageScore(name);
+}
+
+function updateBalanceScore(input) {
+  const name = input.dataset.playerName;
+  const laneKey = input.dataset.lane;
+  if (!name || !laneKey) return;
+
+  if (input.value === "") return;
+
+  const score = clampScore(input.value, scoresForPlayer(name)[laneKey]);
+  input.value = String(score);
+  scoresForPlayer(name)[laneKey] = score;
+  savePlayerSkillScores();
+  savePlayerScoreToDatabase(name, laneKey, score);
+  updateBalanceAverage(name);
+}
+
+function settleBalanceScore(input) {
+  const name = input.dataset.playerName;
+  const laneKey = input.dataset.lane;
+  if (!name || !laneKey) return;
+
+  const currentScore = scoresForPlayer(name)[laneKey];
+  if (input.value === "") {
+    input.value = String(clampScore(currentScore, 50));
+    return;
+  }
+
+  updateBalanceScore(input);
+}
+
+function switchPage(pageKey, shouldScroll = true) {
+  pageViews.forEach((view) => {
+    const isActive = view.dataset.pageView === pageKey;
+    view.classList.toggle("is-active", isActive);
+    view.setAttribute("aria-hidden", String(!isActive));
+  });
+
+  pageToggleButtons.forEach((button) => {
+    const isActive = button.dataset.pageTarget === pageKey;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-pressed", String(isActive));
+  });
+
+  pageSwitch?.setAttribute("data-active-page", pageKey);
+  document.body.dataset.activePage = pageKey;
+
+  if (pageKey === "balance") {
+    renderBalanceScores();
+    document.querySelector("#balance")?.classList.add("is-visible");
+  }
+
+  if (shouldScroll) {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+}
+
 function fillPlayers(names) {
   const inputs = [...playerInputs.querySelectorAll("input")];
   inputs.forEach((input, index) => {
@@ -297,6 +554,7 @@ function fillPlayers(names) {
   syncPresetPlayersWithInputs();
   updateFilledCount();
   renderPlayerPool();
+  renderBalanceScores();
   if (!assignments) renderEmptyBoard();
 }
 
@@ -337,6 +595,7 @@ function togglePlayerFromPool(name) {
   syncPresetPlayersWithInputs();
   updateFilledCount();
   renderPlayerPool();
+  renderBalanceScores();
   if (!assignments) renderEmptyBoard();
 }
 
@@ -360,6 +619,7 @@ function addNewPlayerName() {
   syncPresetPlayersWithInputs();
   updateFilledCount();
   renderPlayerPool();
+  renderBalanceScores();
   if (!assignments) renderEmptyBoard();
 }
 
@@ -1443,7 +1703,7 @@ function createSessionRecord() {
   };
 }
 
-function recordCurrentSession() {
+async function recordCurrentSession() {
   if (!assignments) {
     statusLabel.textContent = "먼저 랜덤 배정을 완료하세요.";
     return;
@@ -1456,10 +1716,17 @@ function recordCurrentSession() {
     return;
   }
 
-  sessionRecords = [createSessionRecord(), ...sessionRecords];
+  const localRecord = createSessionRecord();
+  sessionRecords = [localRecord, ...sessionRecords];
   lastRecordedSignature = signature;
   renderHistory();
   updatePlaySessionButton();
+
+  const databaseRecord = await saveSessionRecordToDatabase(localRecord);
+  if (databaseRecord) {
+    sessionRecords = [databaseRecord, ...sessionRecords.slice(1)];
+    renderHistory();
+  }
 
   const usedCount = sessionUsedChampionIds().size;
   statusLabel.textContent = `플레이 기록을 저장했습니다. 피어리스 적용 시 ${usedCount}개 챔피언이 제외됩니다.`;
@@ -1470,6 +1737,7 @@ function resetSessionRecords() {
   lastRecordedSignature = "";
   renderHistory();
   updatePlaySessionButton();
+  resetSessionRecordsInDatabase();
   statusLabel.textContent = "세션 기록을 초기화했습니다. 피어리스 제외 챔피언도 모두 해제되었습니다.";
 }
 
@@ -1550,16 +1818,22 @@ function addListener(element, eventName, handler) {
   if (element) element.addEventListener(eventName, handler);
 }
 
-createPlayerInputs();
-renderPlayerPool();
-renderEmptyBoard();
-renderLaneTabs();
-renderChampionPool();
-renderHistory();
-updatePlaySessionButton();
-observeReveal();
-addButtonRipples();
-setSpeedLabel();
+async function initializeApp() {
+  await loadDatabaseState();
+  createPlayerInputs();
+  renderPlayerPool();
+  renderEmptyBoard();
+  renderLaneTabs();
+  renderChampionPool();
+  renderHistory();
+  renderBalanceScores();
+  updatePlaySessionButton();
+  observeReveal();
+  addButtonRipples();
+  setSpeedLabel();
+}
+
+initializeApp();
 
 addListener(sampleButton, "click", () => {
   fillPlayers(playerPoolNames.slice(0, 10));
@@ -1584,6 +1858,28 @@ addListener(clearButton, "click", () => {
 addListener(randomizeButton, "click", randomizeDraft);
 addListener(playSessionButton, "click", recordCurrentSession);
 addListener(resetSessionButton, "click", resetSessionRecords);
+addListener(pageSwitch, "click", (event) => {
+  const button = event.target.closest("[data-page-target]");
+  if (!button) return;
+  const pageKey = button.dataset.pageTarget;
+  if (pageSwitch.dataset.activePage === pageKey) return;
+  switchPage(pageKey);
+});
+addListener(topnav, "click", (event) => {
+  if (!event.target.closest("a")) return;
+  switchPage("random", false);
+});
+addListener(document.querySelector(".brand"), "click", () => {
+  switchPage("random", false);
+});
+addListener(balanceScoreGrid, "input", (event) => {
+  const input = event.target.closest(".balance-score-input");
+  if (input) updateBalanceScore(input);
+});
+addListener(balanceScoreGrid, "focusout", (event) => {
+  const input = event.target.closest(".balance-score-input");
+  if (input) settleBalanceScore(input);
+});
 
 addListener(teamBoard, "click", (event) => {
   const presetTrigger = event.target.closest(".preset-trigger");
