@@ -25,11 +25,6 @@ const selectedChampionIdsByLane = Object.fromEntries(
   lanes.map((lane) => [lane.key, new Set(defaultLaneChampionIds[lane.key] || [])])
 );
 
-const PLAYER_POOL_STORAGE_KEY = "sekwangRandomCKPlayerPool";
-const PLAYER_SCORE_STORAGE_KEY = "sekwangRandomCKPlayerScores";
-const PLAYER_SCORE_PROFILE_VERSION_KEY = "sekwangRandomCKPlayerScoreProfileVersion";
-const BALANCE_RULE_STORAGE_KEY = "sekwangRandomCKBalanceRules";
-const DEFAULT_SCORE_PROFILE_VERSION = "2026-05-04-a";
 const defaultPlayerPool = [
   "상현",
   "지안",
@@ -261,20 +256,10 @@ function orderedPlayerPoolNames() {
 }
 
 function loadPlayerPoolNames() {
-  try {
-    const storedNames = JSON.parse(window.localStorage.getItem(PLAYER_POOL_STORAGE_KEY) || "[]");
-    return uniqueNames([...defaultPlayerPool, ...(Array.isArray(storedNames) ? storedNames : [])]);
-  } catch {
-    return [...defaultPlayerPool];
-  }
+  return [...defaultPlayerPool];
 }
 
 function savePlayerPoolNames(shouldSync = true) {
-  try {
-    window.localStorage.setItem(PLAYER_POOL_STORAGE_KEY, JSON.stringify(playerPoolNames));
-  } catch {
-    // Local storage can be unavailable for file URLs in some browsers.
-  }
   if (shouldSync) syncPlayerPoolToDatabase();
 }
 
@@ -289,10 +274,6 @@ function defaultPlayerScores(name = "") {
   return Object.fromEntries(lanes.map((lane) => [lane.key, profile?.[lane.key] ?? 50]));
 }
 
-function isFlatDefaultScoreSet(scores = {}) {
-  return lanes.every((lane) => clampScore(scores[lane.key], 50) === 50);
-}
-
 function sanitizePlayerScores(rawScores = {}, playerName = "") {
   const fallbackScores = defaultPlayerScores(playerName);
   return Object.fromEntries(
@@ -301,49 +282,7 @@ function sanitizePlayerScores(rawScores = {}, playerName = "") {
 }
 
 function loadPlayerSkillScores() {
-  try {
-    const storedScores = JSON.parse(window.localStorage.getItem(PLAYER_SCORE_STORAGE_KEY) || "{}");
-    if (!storedScores || typeof storedScores !== "object" || Array.isArray(storedScores)) {
-      return {};
-    }
-
-    return Object.fromEntries(
-      Object.entries(storedScores).map(([name, scores]) => [
-        normalizeName(name),
-        sanitizePlayerScores(scores, normalizeName(name))
-      ])
-    );
-  } catch {
-    return {};
-  }
-}
-
-function applyDefaultScoreProfilesToFlatScores() {
-  let didChange = false;
-  try {
-    if (window.localStorage.getItem(PLAYER_SCORE_PROFILE_VERSION_KEY) === DEFAULT_SCORE_PROFILE_VERSION) {
-      return false;
-    }
-  } catch {
-    // Local storage can be unavailable for file URLs in some browsers.
-  }
-
-  defaultPlayerPool.forEach((name) => {
-    const scores = playerSkillScores[name];
-    if (!scores || isFlatDefaultScoreSet(scores)) {
-      playerSkillScores[name] = defaultPlayerScores(name);
-      didChange = true;
-    }
-  });
-
-  try {
-    window.localStorage.setItem(PLAYER_SCORE_PROFILE_VERSION_KEY, DEFAULT_SCORE_PROFILE_VERSION);
-  } catch {
-    // Local storage can be unavailable for file URLs in some browsers.
-  }
-
-  if (didChange) savePlayerSkillScores();
-  return didChange;
+  return {};
 }
 
 function pairKey(firstName, secondName) {
@@ -432,32 +371,18 @@ function sanitizeBalanceRules(rawRules = {}) {
 }
 
 function loadBalanceRules() {
-  try {
-    const storedRules = JSON.parse(window.localStorage.getItem(BALANCE_RULE_STORAGE_KEY) || "{}");
-    if (!storedRules || typeof storedRules !== "object" || Array.isArray(storedRules)) {
-      return sanitizeBalanceRules();
-    }
-
-    return sanitizeBalanceRules(storedRules);
-  } catch {
-    return sanitizeBalanceRules();
-  }
+  return sanitizeBalanceRules();
 }
 
 function saveBalanceRules() {
-  try {
-    window.localStorage.setItem(BALANCE_RULE_STORAGE_KEY, JSON.stringify(balanceRules));
-  } catch {
-    // Local storage can be unavailable for file URLs in some browsers.
-  }
-}
-
-function savePlayerSkillScores() {
-  try {
-    window.localStorage.setItem(PLAYER_SCORE_STORAGE_KEY, JSON.stringify(playerSkillScores));
-  } catch {
-    // Local storage can be unavailable for file URLs in some browsers.
-  }
+  if (!databaseStorageReady) return;
+  apiRequest("/api/balance-rules", {
+    method: "PUT",
+    body: JSON.stringify(balanceRules)
+  }).catch(() => {
+    databaseStorageReady = false;
+    databaseStatusMessage = "PostgreSQL 저장 실패: 밸런스 규칙이 저장되지 않았습니다.";
+  });
 }
 
 async function apiRequest(path, options = {}) {
@@ -481,22 +406,23 @@ async function apiRequest(path, options = {}) {
 async function loadDatabaseState() {
   try {
     const data = await apiRequest("/api/state", { cache: "no-store" });
-    databaseStorageReady = data.storage === "postgres";
+    databaseStorageReady = Boolean(data.ready);
     databaseStatusMessage = databaseStorageReady
       ? "PostgreSQL 저장소에 연결되었습니다."
       : data.configured
-        ? `DB 연결 실패로 브라우저 저장으로 동작 중입니다. ${data.error || ""}`.trim()
-        : "DB 연결 변수가 없어 브라우저 저장으로 동작 중입니다.";
-    playerPoolNames = uniqueNames([
-      ...defaultPlayerPool,
-      ...(Array.isArray(data.playerPoolNames) ? data.playerPoolNames : [])
-    ]);
+        ? `PostgreSQL 연결 실패: 변경사항이 저장되지 않습니다. ${data.error || ""}`.trim()
+        : "PostgreSQL 연결 정보가 없어 변경사항이 저장되지 않습니다.";
+    const databasePlayerNames = Array.isArray(data.playerPoolNames) ? data.playerPoolNames : [];
+    playerPoolNames = databaseStorageReady
+      ? uniqueNames(databasePlayerNames)
+      : uniqueNames([...defaultPlayerPool, ...databasePlayerNames]);
     playerSkillScores = sanitizeSkillScoreMap(data.playerSkillScores || {});
+    balanceRules = sanitizeBalanceRules(data.balanceRules || {});
     sessionRecords = Array.isArray(data.sessionRecords) ? data.sessionRecords : [];
     selectedPlayerNames = new Set(sortPlayerNames(playerPoolNames).slice(0, 10));
   } catch {
     databaseStorageReady = false;
-    databaseStatusMessage = "서버 API에 연결할 수 없어 브라우저 저장으로 동작 중입니다.";
+    databaseStatusMessage = "PostgreSQL API에 연결할 수 없어 변경사항이 저장되지 않습니다.";
   }
 }
 
@@ -518,6 +444,7 @@ function syncPlayerPoolToDatabase() {
     body: JSON.stringify({ names: playerPoolNames })
   }).catch(() => {
     databaseStorageReady = false;
+    databaseStatusMessage = "PostgreSQL 저장 실패: 플레이어 명단이 저장되지 않았습니다.";
   });
 }
 
@@ -528,6 +455,15 @@ function savePlayerScoreToDatabase(name, laneKey, score) {
     body: JSON.stringify({ name, laneKey, score })
   }).catch(() => {
     databaseStorageReady = false;
+    databaseStatusMessage = "PostgreSQL 저장 실패: 실력 점수가 저장되지 않았습니다.";
+  });
+}
+
+function savePlayerScoresForNameToDatabase(name) {
+  if (!databaseStorageReady) return;
+  const scores = scoresForPlayer(name);
+  lanes.forEach((lane) => {
+    savePlayerScoreToDatabase(name, lane.key, scores[lane.key]);
   });
 }
 
@@ -538,6 +474,7 @@ function renamePlayerInDatabase(oldName, newName) {
     body: JSON.stringify({ oldName, newName })
   }).catch(() => {
     databaseStorageReady = false;
+    databaseStatusMessage = "PostgreSQL 저장 실패: 플레이어 이름이 저장되지 않았습니다.";
   });
 }
 
@@ -548,6 +485,7 @@ function deletePlayerFromDatabase(name) {
     body: JSON.stringify({ name })
   }).catch(() => {
     databaseStorageReady = false;
+    databaseStatusMessage = "PostgreSQL 저장 실패: 플레이어 삭제가 저장되지 않았습니다.";
   });
 }
 
@@ -561,6 +499,7 @@ async function saveSessionRecordToDatabase(record) {
     return data.record || null;
   } catch {
     databaseStorageReady = false;
+    databaseStatusMessage = "PostgreSQL 저장 실패: 세션 기록이 저장되지 않았습니다.";
     return null;
   }
 }
@@ -569,6 +508,7 @@ function resetSessionRecordsInDatabase() {
   if (!databaseStorageReady) return;
   apiRequest("/api/session-records", { method: "DELETE" }).catch(() => {
     databaseStorageReady = false;
+    databaseStatusMessage = "PostgreSQL 저장 실패: 세션 초기화가 저장되지 않았습니다.";
   });
 }
 
@@ -725,7 +665,7 @@ function addPlayerNameToPool(rawName, shouldAddToDraft = false) {
     playerPoolNames = [...playerPoolNames, name];
     scoresForPlayer(name);
     savePlayerPoolNames();
-    savePlayerSkillScores();
+    savePlayerScoresForNameToDatabase(name);
   }
 
   if (shouldAddToDraft && addPlayerToInput(name)) {
@@ -783,7 +723,6 @@ function renamePlayerName(oldName, rawNewName) {
   delete playerSkillScores[oldName];
   renameBalancePlayerReferences(oldName, newName);
   savePlayerPoolNames(false);
-  savePlayerSkillScores();
   renamePlayerInDatabase(oldName, newName);
   rerenderPlayerViews();
   setSettingsStatus(`${oldName}을 ${newName}으로 변경했습니다.`);
@@ -810,7 +749,6 @@ function deletePlayerName(name) {
 
   deleteBalancePlayerReferences(name);
   savePlayerPoolNames(false);
-  savePlayerSkillScores();
   deletePlayerFromDatabase(name);
   rerenderPlayerViews();
   setSettingsStatus(`${name}을 플레이어 풀에서 삭제했습니다.`);
@@ -886,7 +824,6 @@ function updateBalanceScore(input) {
   const score = clampScore(input.value, scoresForPlayer(name)[laneKey]);
   input.value = String(score);
   scoresForPlayer(name)[laneKey] = score;
-  savePlayerSkillScores();
   savePlayerScoreToDatabase(name, laneKey, score);
   updateBalanceAverage(name);
   if (balanceAssignments) {
@@ -3107,14 +3044,6 @@ function addListener(element, eventName, handler) {
 
 async function initializeApp() {
   await loadDatabaseState();
-  const migratedDefaultScores = applyDefaultScoreProfilesToFlatScores();
-  if (migratedDefaultScores && databaseStorageReady) {
-    defaultPlayerPool.forEach((name) => {
-      lanes.forEach((lane) => {
-        savePlayerScoreToDatabase(name, lane.key, scoresForPlayer(name)[lane.key]);
-      });
-    });
-  }
   createPlayerInputs();
   renderPlayerPool();
   renderBalanceParticipantPool();

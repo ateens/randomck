@@ -36,6 +36,26 @@ const defaultPlayerPool = [
   "인의",
   "예지"
 ];
+const defaultPlayerSkillProfiles = {
+  상현: { top: 82, jungle: 68, mid: 74, bot: 61, support: 59 },
+  지안: { top: 55, jungle: 72, mid: 81, bot: 66, support: 70 },
+  지혜: { top: 61, jungle: 58, mid: 74, bot: 83, support: 76 },
+  지상: { top: 79, jungle: 64, mid: 69, bot: 62, support: 55 },
+  예진: { top: 48, jungle: 63, mid: 71, bot: 78, support: 82 },
+  예완: { top: 67, jungle: 84, mid: 60, bot: 57, support: 65 },
+  성원: { top: 74, jungle: 76, mid: 58, bot: 69, support: 52 },
+  강산: { top: 70, jungle: 59, mid: 83, bot: 64, support: 61 },
+  강희: { top: 57, jungle: 69, mid: 62, bot: 75, support: 80 },
+  은우: { top: 64, jungle: 55, mid: 72, bot: 85, support: 68 },
+  "태영(김)": { top: 86, jungle: 61, mid: 66, bot: 58, support: 54 },
+  "태영(윤)": { top: 59, jungle: 78, mid: 73, bot: 60, support: 67 },
+  선진: { top: 63, jungle: 70, mid: 55, bot: 82, support: 74 },
+  재윤: { top: 77, jungle: 57, mid: 80, bot: 65, support: 59 },
+  동근: { top: 72, jungle: 83, mid: 61, bot: 56, support: 62 },
+  승헌: { top: 66, jungle: 62, mid: 84, bot: 71, support: 57 },
+  인의: { top: 54, jungle: 74, mid: 68, bot: 63, support: 86 },
+  예지: { top: 58, jungle: 60, mid: 76, bot: 79, support: 81 }
+};
 
 const databaseUrl =
   process.env.DATABASE_URL ||
@@ -105,6 +125,87 @@ function isLaneKey(value) {
   return lanes.some((lane) => lane.key === value);
 }
 
+function pairKey(firstName, secondName) {
+  return [firstName, secondName].sort((first, second) => first.localeCompare(second, "ko-KR")).join("::");
+}
+
+function groupKey(members = []) {
+  return [...members].sort((first, second) => first.localeCompare(second, "ko-KR")).join("::");
+}
+
+function sanitizeTogetherRules(rules = []) {
+  const seen = new Set();
+  return (Array.isArray(rules) ? rules : [])
+    .map((rule) => {
+      const members = uniqueNames(Array.isArray(rule?.members) ? rule.members : []).slice(0, 5);
+      return { members };
+    })
+    .filter((rule) => {
+      if (rule.members.length < 2) return false;
+      const key = groupKey(rule.members);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function sanitizePairRules(rules = []) {
+  const seen = new Set();
+  return (Array.isArray(rules) ? rules : [])
+    .map((rule) => {
+      const first = normalizeName(rule?.first || "");
+      const second = normalizeName(rule?.second || "");
+      return { first, second };
+    })
+    .filter((rule) => {
+      if (!rule.first || !rule.second || rule.first === rule.second) return false;
+      const key = pairKey(rule.first, rule.second);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function sanitizeFixedPositionRules(rules = []) {
+  const seenPlayers = new Set();
+  return (Array.isArray(rules) ? rules : [])
+    .map((rule) => {
+      const player = normalizeName(rule?.player || "");
+      const lane = isLaneKey(rule?.lane) ? rule.lane : "";
+      return { player, lane };
+    })
+    .filter((rule) => {
+      if (!rule.player || !rule.lane || seenPlayers.has(rule.player)) return false;
+      seenPlayers.add(rule.player);
+      return true;
+    });
+}
+
+function sanitizeExcludedPositionRules(rules = []) {
+  const seen = new Set();
+  return (Array.isArray(rules) ? rules : [])
+    .map((rule) => {
+      const player = normalizeName(rule?.player || "");
+      const lane = isLaneKey(rule?.lane) ? rule.lane : "";
+      return { player, lane };
+    })
+    .filter((rule) => {
+      const key = `${rule.player}::${rule.lane}`;
+      if (!rule.player || !rule.lane || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function sanitizeBalanceRules(rawRules = {}) {
+  return {
+    together: sanitizeTogetherRules(rawRules.together),
+    separate: sanitizePairRules(rawRules.separate),
+    fixed: sanitizeFixedPositionRules(rawRules.fixed),
+    excluded: sanitizeExcludedPositionRules(rawRules.excluded)
+  };
+}
+
 async function initializeDatabase() {
   if (!pool) return false;
   if (databaseReady) return true;
@@ -151,11 +252,19 @@ async function initializeDatabase() {
         PRIMARY KEY (session_id, lane_key)
       )
     `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
 
     const playerCount = await pool.query("SELECT COUNT(*)::int AS count FROM players");
     if (playerCount.rows[0].count === 0) {
       await upsertPlayers(defaultPlayerPool);
     }
+    await upsertDefaultPlayerScores();
     databaseReady = true;
     lastDatabaseError = "";
     return true;
@@ -181,7 +290,7 @@ async function databaseIsAvailable() {
 async function databaseStatus() {
   const ready = await initializeDatabase();
   return {
-    storage: ready ? "postgres" : "browser",
+    storage: "postgres",
     configured: hasDatabaseConfig,
     ready,
     error: ready ? "" : lastDatabaseError,
@@ -196,6 +305,15 @@ async function databaseStatus() {
       PGPASSWORD: Boolean(process.env.PGPASSWORD)
     }
   };
+}
+
+function sendDatabaseUnavailable(response) {
+  response.status(503).json({
+    storage: "postgres",
+    ok: false,
+    ready: false,
+    error: lastDatabaseError || "PostgreSQL is not ready."
+  });
 }
 
 async function upsertPlayers(names) {
@@ -215,6 +333,36 @@ async function upsertPlayers(names) {
         `,
         [name, index]
       );
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function upsertDefaultPlayerScores() {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    for (const name of defaultPlayerPool) {
+      const profile = defaultPlayerSkillProfiles[name];
+      const playerResult = await client.query("SELECT id FROM players WHERE name = $1", [name]);
+      const playerId = playerResult.rows[0]?.id;
+      if (!playerId || !profile) continue;
+
+      for (const lane of lanes) {
+        await client.query(
+          `
+            INSERT INTO player_lane_scores (player_id, lane_key, score, updated_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (player_id, lane_key) DO NOTHING
+          `,
+          [playerId, lane.key, clampScore(profile[lane.key])]
+        );
+      }
     }
     await client.query("COMMIT");
   } catch (error) {
@@ -392,6 +540,25 @@ async function readSessionRecords() {
   }));
 }
 
+async function readBalanceRules() {
+  const result = await pool.query("SELECT value FROM app_settings WHERE key = $1", ["balance_rules"]);
+  return sanitizeBalanceRules(result.rows[0]?.value || {});
+}
+
+async function saveBalanceRules(rawRules) {
+  const rules = sanitizeBalanceRules(rawRules || {});
+  await pool.query(
+    `
+      INSERT INTO app_settings (key, value, updated_at)
+      VALUES ($1, $2::jsonb, NOW())
+      ON CONFLICT (key)
+      DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+    `,
+    ["balance_rules", JSON.stringify(rules)]
+  );
+  return rules;
+}
+
 function sanitizeSessionLane(laneRecord) {
   const lane = lanes.find((item) => item.key === laneRecord?.key);
   if (!lane || !laneRecord?.blue?.champion || !laneRecord?.red?.champion) {
@@ -494,9 +661,10 @@ app.get("/api/state", async (_request, response, next) => {
     if (!status.ready) {
       response.json({
         ...status,
-        storage: "browser",
+        storage: "postgres",
         playerPoolNames: [],
         playerSkillScores: {},
+        balanceRules: sanitizeBalanceRules(),
         sessionRecords: []
       });
       return;
@@ -507,6 +675,7 @@ app.get("/api/state", async (_request, response, next) => {
       storage: "postgres",
       playerPoolNames: await readPlayerPoolNames(),
       playerSkillScores: await readPlayerScores(),
+      balanceRules: await readBalanceRules(),
       sessionRecords: await readSessionRecords()
     });
   } catch (error) {
@@ -517,7 +686,7 @@ app.get("/api/state", async (_request, response, next) => {
 app.post("/api/players/sync", async (request, response, next) => {
   try {
     if (!(await databaseIsAvailable())) {
-      response.json({ storage: "browser", ok: false });
+      sendDatabaseUnavailable(response);
       return;
     }
 
@@ -531,7 +700,7 @@ app.post("/api/players/sync", async (request, response, next) => {
 app.post("/api/players/rename", async (request, response, next) => {
   try {
     if (!(await databaseIsAvailable())) {
-      response.json({ storage: "browser", ok: false });
+      sendDatabaseUnavailable(response);
       return;
     }
 
@@ -545,7 +714,7 @@ app.post("/api/players/rename", async (request, response, next) => {
 app.post("/api/players/delete", async (request, response, next) => {
   try {
     if (!(await databaseIsAvailable())) {
-      response.json({ storage: "browser", ok: false });
+      sendDatabaseUnavailable(response);
       return;
     }
 
@@ -559,7 +728,7 @@ app.post("/api/players/delete", async (request, response, next) => {
 app.put("/api/player-score", async (request, response, next) => {
   try {
     if (!(await databaseIsAvailable())) {
-      response.json({ storage: "browser", ok: false });
+      sendDatabaseUnavailable(response);
       return;
     }
 
@@ -570,10 +739,24 @@ app.put("/api/player-score", async (request, response, next) => {
   }
 });
 
+app.put("/api/balance-rules", async (request, response, next) => {
+  try {
+    if (!(await databaseIsAvailable())) {
+      sendDatabaseUnavailable(response);
+      return;
+    }
+
+    const balanceRules = await saveBalanceRules(request.body || {});
+    response.json({ ok: true, balanceRules });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/session-records", async (request, response, next) => {
   try {
     if (!(await databaseIsAvailable())) {
-      response.json({ storage: "browser", ok: false });
+      sendDatabaseUnavailable(response);
       return;
     }
 
@@ -587,7 +770,7 @@ app.post("/api/session-records", async (request, response, next) => {
 app.delete("/api/session-records", async (_request, response, next) => {
   try {
     if (!(await databaseIsAvailable())) {
-      response.json({ storage: "browser", ok: false });
+      sendDatabaseUnavailable(response);
       return;
     }
 
@@ -630,7 +813,7 @@ app.use((error, _request, response, _next) => {
 
 initializeDatabase().then((ready) => {
   if (!ready) {
-    console.warn("PostgreSQL is not ready. Static app will run with browser fallback storage.");
+    console.warn("PostgreSQL is not ready. Persistence is disabled until the database is connected.");
   }
 });
 
