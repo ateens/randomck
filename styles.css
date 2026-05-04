@@ -190,14 +190,20 @@ a {
 
 .brand-mark {
   display: grid;
-  width: 38px;
-  height: 38px;
+  width: 42px;
+  height: 42px;
   place-items: center;
-  color: #254733;
-  background: linear-gradient(135deg, var(--mint), var(--lemon));
-  border: 1px solid rgba(37, 71, 51, 0.12);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.brand-mark img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .topnav {
