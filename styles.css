@@ -2387,15 +2387,6 @@ h3 {
   background: linear-gradient(145deg, rgba(200, 231, 255, 0.78), rgba(255, 255, 255, 0.78));
 }
 
-.balance-drag-guide {
-  display: inline-flex;
-  min-height: 34px;
-  align-items: center;
-  color: #7a8796;
-  font-size: 0.78rem;
-  font-weight: 850;
-}
-
 .balance-board {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 116px minmax(0, 1fr);
@@ -2457,7 +2448,7 @@ h3 {
 .balance-card {
   position: relative;
   display: grid;
-  grid-template-columns: 58px minmax(0, 1fr);
+  grid-template-columns: 58px minmax(0, 1fr) minmax(70px, auto);
   gap: 10px;
   min-height: 82px;
   align-items: center;
@@ -2561,7 +2552,7 @@ h3 {
 .balance-card-main {
   display: grid;
   min-width: 0;
-  gap: 4px;
+  gap: 0;
 }
 
 .balance-card-main strong {
@@ -2574,10 +2565,14 @@ h3 {
   white-space: nowrap;
 }
 
-.balance-card-main span {
-  color: var(--muted);
-  font-size: 0.82rem;
+.balance-card-hint {
+  justify-self: end;
+  width: 74px;
+  color: #7a8796;
+  font-size: 0.7rem;
   font-weight: 850;
+  line-height: 1.25;
+  text-align: center;
 }
 
 .balance-lane-center-list {

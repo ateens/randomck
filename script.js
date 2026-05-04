@@ -1541,7 +1541,6 @@ function renderBalanceSummary() {
   const { totalFit } = balanceAssignments.meta;
   balanceSummary.innerHTML = `
     <strong>포지션 적합도 ${totalFit}점</strong>
-    <small class="balance-drag-guide">플레이어 카드를 드래그해서 위치 변경</small>
   `;
 }
 
@@ -1563,8 +1562,8 @@ function balanceCardMarkup(team, lane, row, animated, index) {
       <span class="balance-card-score">${scoreText}</span>
       <span class="balance-card-main">
         <strong>${escapeHtml(playerText)}</strong>
-        <span>${lane.label} 영향력</span>
       </span>
+      ${row ? `<small class="balance-card-hint">드래그해서 위치 변경</small>` : ""}
     </article>
   `;
 }
