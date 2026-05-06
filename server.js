@@ -56,6 +56,14 @@ const defaultPlayerSkillProfiles = {
   인의: { top: 54, jungle: 74, mid: 68, bot: 63, support: 86 },
   예지: { top: 58, jungle: 60, mid: 76, bot: 79, support: 81 }
 };
+const playerScoreTableName = "player_lane_scores";
+const kangsanScoreTableName = "kangsan_player_lane_scores";
+const defaultKangsanPlayerSkillProfiles = Object.fromEntries(
+  defaultPlayerPool.map((name) => [
+    name,
+    Object.fromEntries(lanes.map((lane) => [lane.key, 0]))
+  ])
+);
 
 const databaseUrl =
   process.env.DATABASE_URL ||
@@ -231,6 +239,15 @@ async function initializeDatabase() {
       )
     `);
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS kangsan_player_lane_scores (
+        player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+        lane_key TEXT NOT NULL,
+        score INTEGER NOT NULL DEFAULT 0 CHECK (score >= 0 AND score <= 100),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (player_id, lane_key)
+      )
+    `);
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS session_records (
         id BIGSERIAL PRIMARY KEY,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -265,6 +282,8 @@ async function initializeDatabase() {
       await upsertPlayers(defaultPlayerPool);
     }
     await upsertDefaultPlayerScores();
+    await upsertDefaultKangsanPlayerScores();
+    await resetLegacyKangsanDefaultsToZero();
     databaseReady = true;
     lastDatabaseError = "";
     return true;
@@ -343,10 +362,55 @@ async function upsertPlayers(names) {
   }
 }
 
-async function upsertDefaultPlayerScores() {
+async function upsertDefaultScores(tableName, scoreProfiles = defaultPlayerSkillProfiles) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    for (const name of defaultPlayerPool) {
+      const profile = scoreProfiles[name];
+      const playerResult = await client.query("SELECT id FROM players WHERE name = $1", [name]);
+      const playerId = playerResult.rows[0]?.id;
+      if (!playerId || !profile) continue;
+
+      for (const lane of lanes) {
+        await client.query(
+          `
+            INSERT INTO ${tableName} (player_id, lane_key, score, updated_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (player_id, lane_key) DO NOTHING
+          `,
+          [playerId, lane.key, clampScore(profile[lane.key])]
+        );
+      }
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function upsertDefaultPlayerScores() {
+  return upsertDefaultScores(playerScoreTableName);
+}
+
+async function upsertDefaultKangsanPlayerScores() {
+  return upsertDefaultScores(kangsanScoreTableName, defaultKangsanPlayerSkillProfiles);
+}
+
+async function resetLegacyKangsanDefaultsToZero() {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const migrationKey = "kangsan_zero_defaults_migrated";
+    const migrationResult = await client.query("SELECT value FROM app_settings WHERE key = $1", [migrationKey]);
+    if (migrationResult.rowCount > 0) {
+      await client.query("COMMIT");
+      return;
+    }
+
     for (const name of defaultPlayerPool) {
       const profile = defaultPlayerSkillProfiles[name];
       const playerResult = await client.query("SELECT id FROM players WHERE name = $1", [name]);
@@ -356,14 +420,25 @@ async function upsertDefaultPlayerScores() {
       for (const lane of lanes) {
         await client.query(
           `
-            INSERT INTO player_lane_scores (player_id, lane_key, score, updated_at)
-            VALUES ($1, $2, $3, NOW())
-            ON CONFLICT (player_id, lane_key) DO NOTHING
+            UPDATE kangsan_player_lane_scores
+            SET score = 0, updated_at = NOW()
+            WHERE player_id = $1
+              AND lane_key = $2
+              AND score = $3
           `,
           [playerId, lane.key, clampScore(profile[lane.key])]
         );
       }
     }
+    await client.query(
+      `
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES ($1, $2::jsonb, NOW())
+        ON CONFLICT (key)
+        DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+      `,
+      [migrationKey, JSON.stringify(true)]
+    );
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");
@@ -382,10 +457,10 @@ async function readPlayerPoolNames() {
   return result.rows.map((row) => row.name);
 }
 
-async function readPlayerScores() {
+async function readScoresFromTable(tableName) {
   const result = await pool.query(`
     SELECT p.name, s.lane_key, s.score
-    FROM player_lane_scores s
+    FROM ${tableName} s
     JOIN players p ON p.id = s.player_id
     ORDER BY p.sort_order ASC, p.id ASC
   `);
@@ -397,7 +472,15 @@ async function readPlayerScores() {
   return scores;
 }
 
-async function savePlayerScore(name, laneKey, score) {
+async function readPlayerScores() {
+  return readScoresFromTable(playerScoreTableName);
+}
+
+async function readKangsanPlayerScores() {
+  return readScoresFromTable(kangsanScoreTableName);
+}
+
+async function saveScoreToTable(tableName, name, laneKey, score) {
   const normalizedName = normalizeName(name);
   if (!normalizedName || !isLaneKey(laneKey)) {
     const error = new Error("Invalid player score payload");
@@ -420,7 +503,7 @@ async function savePlayerScore(name, laneKey, score) {
     const playerId = playerResult.rows[0].id;
     await client.query(
       `
-        INSERT INTO player_lane_scores (player_id, lane_key, score, updated_at)
+        INSERT INTO ${tableName} (player_id, lane_key, score, updated_at)
         VALUES ($1, $2, $3, NOW())
         ON CONFLICT (player_id, lane_key)
         DO UPDATE SET score = EXCLUDED.score, updated_at = NOW()
@@ -434,6 +517,14 @@ async function savePlayerScore(name, laneKey, score) {
   } finally {
     client.release();
   }
+}
+
+async function savePlayerScore(name, laneKey, score) {
+  return saveScoreToTable(playerScoreTableName, name, laneKey, score);
+}
+
+async function saveKangsanPlayerScore(name, laneKey, score) {
+  return saveScoreToTable(kangsanScoreTableName, name, laneKey, score);
 }
 
 async function renamePlayer(oldName, newName) {
@@ -664,6 +755,7 @@ app.get("/api/state", async (_request, response, next) => {
         storage: "postgres",
         playerPoolNames: [],
         playerSkillScores: {},
+        kangsanPlayerSkillScores: {},
         balanceRules: sanitizeBalanceRules(),
         sessionRecords: []
       });
@@ -675,6 +767,7 @@ app.get("/api/state", async (_request, response, next) => {
       storage: "postgres",
       playerPoolNames: await readPlayerPoolNames(),
       playerSkillScores: await readPlayerScores(),
+      kangsanPlayerSkillScores: await readKangsanPlayerScores(),
       balanceRules: await readBalanceRules(),
       sessionRecords: await readSessionRecords()
     });
@@ -733,6 +826,20 @@ app.put("/api/player-score", async (request, response, next) => {
     }
 
     await savePlayerScore(request.body?.name, request.body?.laneKey, request.body?.score);
+    response.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/kangsan-player-score", async (request, response, next) => {
+  try {
+    if (!(await databaseIsAvailable())) {
+      sendDatabaseUnavailable(response);
+      return;
+    }
+
+    await saveKangsanPlayerScore(request.body?.name, request.body?.laneKey, request.body?.score);
     response.json({ ok: true });
   } catch (error) {
     next(error);

@@ -4,10 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>세광CK</title>
-    <link rel="icon" type="image/png" href="logo_sekwang.png?v=51" />
-    <link rel="stylesheet" href="styles.css?v=51" />
-    <script defer src="champion-data.js?v=51"></script>
-    <script defer src="script.js?v=51"></script>
+    <link rel="icon" type="image/png" href="logo_sekwang.png?v=53" />
+    <link rel="stylesheet" href="styles.css?v=53" />
+    <script defer src="champion-data.js?v=53"></script>
+    <script defer src="script.js?v=53"></script>
   </head>
   <body>
     <div class="page-backdrop" aria-hidden="true">
@@ -17,7 +17,7 @@
 
     <header class="topbar">
       <a class="brand" href="#draft">
-        <span class="brand-mark"><img src="logo_sekwang.png?v=51" alt="" /></span>
+        <span class="brand-mark"><img src="logo_sekwang.png?v=53" alt="" /></span>
         <span>세광CK</span>
       </a>
       <div class="page-switch" id="pageSwitch" data-active-page="random" role="group" aria-label="화면 선택">
@@ -27,6 +27,9 @@
         </button>
         <button class="page-switch-button" type="button" data-page-target="balance" aria-pressed="false">
           밸런스
+        </button>
+        <button class="page-switch-button" type="button" data-page-target="kangsan" aria-pressed="false">
+          강산
         </button>
         <button class="page-switch-button" type="button" data-page-target="settings" aria-pressed="false">
           설정
@@ -285,6 +288,34 @@
             <div class="balance-summary" id="balanceSummary"></div>
             <div class="balance-board" id="balanceBoard"></div>
           </section>
+        </section>
+      </div>
+
+      <div class="page-view" data-page-view="kangsan" aria-hidden="true">
+        <section id="kangsan" class="settings-section reveal-on-scroll" aria-labelledby="kangsanTitle">
+          <div class="section-heading">
+            <p class="eyebrow">강산</p>
+            <h2 id="kangsanTitle">강산 평가</h2>
+          </div>
+
+          <div class="settings-status-card" aria-live="polite">
+            <span class="status-dot"></span>
+            <span id="kangsanStatusLabel">강산 평가 변경을 기다리고 있습니다.</span>
+          </div>
+
+          <div class="settings-layout score-only-layout">
+            <section class="settings-score-panel kangsan-score-panel" aria-labelledby="kangsanScoresTitle">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">라인별 영향력</p>
+                  <h3 id="kangsanScoresTitle">영향력</h3>
+                </div>
+              </div>
+              <div class="balance-score-board" aria-label="강산 평가 라인별 영향력 입력">
+                <div class="balance-score-grid" id="kangsanScoreGrid"></div>
+              </div>
+            </section>
+          </div>
         </section>
       </div>
 

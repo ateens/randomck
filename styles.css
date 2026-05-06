@@ -130,8 +130,8 @@ a {
 .page-switch {
   position: relative;
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  min-width: 286px;
+  grid-template-columns: repeat(4, 1fr);
+  min-width: 360px;
   min-height: 42px;
   padding: 4px;
   border: 1px solid rgba(57, 73, 96, 0.12);
@@ -146,7 +146,7 @@ a {
   position: absolute;
   top: 4px;
   left: 4px;
-  width: calc((100% - 8px) / 3);
+  width: calc((100% - 8px) / 4);
   height: calc(100% - 8px);
   border-radius: calc(var(--radius) - 2px);
   background: linear-gradient(135deg, rgba(200, 231, 255, 0.96), rgba(255, 208, 216, 0.8));
@@ -161,6 +161,10 @@ a {
 }
 
 .page-switch[data-active-page="settings"] .page-switch-thumb {
+  transform: translateX(300%);
+}
+
+.page-switch[data-active-page="kangsan"] .page-switch-thumb {
   transform: translateX(200%);
 }
 
@@ -2630,6 +2634,10 @@ h3 {
   grid-template-columns: minmax(260px, 0.38fr) minmax(0, 1fr);
   gap: 16px;
   align-items: start;
+}
+
+.settings-layout.score-only-layout {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .settings-player-panel,

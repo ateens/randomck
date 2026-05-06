@@ -68,6 +68,7 @@ const defaultPlayerSkillProfiles = {
 let playerPoolNames = loadPlayerPoolNames();
 let selectedPlayerNames = new Set(sortPlayerNames(playerPoolNames).slice(0, 10));
 let playerSkillScores = loadPlayerSkillScores();
+let kangsanPlayerSkillScores = loadKangsanPlayerSkillScores();
 let databaseStorageReady = false;
 let databaseStatusMessage = "";
 
@@ -92,6 +93,7 @@ let balanceAssignments = null;
 let balanceDragState = null;
 let pendingBalanceSwapSlots = new Set();
 let balanceScoreSort = { key: "average", direction: "desc" };
+let kangsanScoreSort = { key: "average", direction: "desc" };
 
 const playerInputs = document.querySelector("#playerInputs");
 const playerPool = document.querySelector("#playerPool");
@@ -122,10 +124,12 @@ const pageToggleButtons = document.querySelectorAll("[data-page-target]");
 const pageViews = document.querySelectorAll("[data-page-view]");
 const topnav = document.querySelector(".topnav");
 const balanceScoreGrid = document.querySelector("#balanceScoreGrid");
+const kangsanScoreGrid = document.querySelector("#kangsanScoreGrid");
 const settingsNewPlayerInput = document.querySelector("#settingsNewPlayerInput");
 const settingsAddPlayerButton = document.querySelector("#settingsAddPlayerButton");
 const settingsPlayerList = document.querySelector("#settingsPlayerList");
 const settingsStatusLabel = document.querySelector("#settingsStatusLabel");
+const kangsanStatusLabel = document.querySelector("#kangsanStatusLabel");
 const balanceStatusLabel = document.querySelector("#balanceStatusLabel");
 const balanceParticipantPool = document.querySelector("#balanceParticipantPool");
 const balanceSelectedPlayerCount = document.querySelector("#balanceSelectedPlayerCount");
@@ -275,6 +279,10 @@ function defaultPlayerScores(name = "") {
   return Object.fromEntries(lanes.map((lane) => [lane.key, profile?.[lane.key] ?? 50]));
 }
 
+function defaultKangsanPlayerScores() {
+  return Object.fromEntries(lanes.map((lane) => [lane.key, 0]));
+}
+
 function sanitizePlayerScores(rawScores = {}, playerName = "") {
   const fallbackScores = defaultPlayerScores(playerName);
   return Object.fromEntries(
@@ -282,7 +290,18 @@ function sanitizePlayerScores(rawScores = {}, playerName = "") {
   );
 }
 
+function sanitizeKangsanPlayerScores(rawScores = {}) {
+  const fallbackScores = defaultKangsanPlayerScores();
+  return Object.fromEntries(
+    lanes.map((lane) => [lane.key, clampScore(rawScores[lane.key], fallbackScores[lane.key])])
+  );
+}
+
 function loadPlayerSkillScores() {
+  return {};
+}
+
+function loadKangsanPlayerSkillScores() {
   return {};
 }
 
@@ -418,6 +437,7 @@ async function loadDatabaseState() {
       ? uniqueNames(databasePlayerNames)
       : uniqueNames([...defaultPlayerPool, ...databasePlayerNames]);
     playerSkillScores = sanitizeSkillScoreMap(data.playerSkillScores || {});
+    kangsanPlayerSkillScores = sanitizeSkillScoreMap(data.kangsanPlayerSkillScores || {}, "kangsan");
     balanceRules = sanitizeBalanceRules(data.balanceRules || {});
     sessionRecords = Array.isArray(data.sessionRecords) ? data.sessionRecords : [];
     selectedPlayerNames = new Set(sortPlayerNames(playerPoolNames).slice(0, 10));
@@ -427,12 +447,16 @@ async function loadDatabaseState() {
   }
 }
 
-function sanitizeSkillScoreMap(rawScores = {}) {
+function sanitizeSkillScoreMap(rawScores = {}, contextKey = "settings") {
   return Object.fromEntries(
     Object.entries(rawScores)
       .map(([name, scores]) => {
         const normalizedName = normalizeName(name);
-        return [normalizedName, sanitizePlayerScores(scores, normalizedName)];
+        const cleanScores =
+          contextKey === "kangsan"
+            ? sanitizeKangsanPlayerScores(scores)
+            : sanitizePlayerScores(scores, normalizedName);
+        return [normalizedName, cleanScores];
       })
       .filter(([name]) => Boolean(name))
   );
@@ -460,11 +484,30 @@ function savePlayerScoreToDatabase(name, laneKey, score) {
   });
 }
 
+function saveKangsanPlayerScoreToDatabase(name, laneKey, score) {
+  if (!databaseStorageReady) return;
+  apiRequest("/api/kangsan-player-score", {
+    method: "PUT",
+    body: JSON.stringify({ name, laneKey, score })
+  }).catch(() => {
+    databaseStorageReady = false;
+    databaseStatusMessage = "PostgreSQL 저장 실패: 강산 평가가 저장되지 않았습니다.";
+  });
+}
+
 function savePlayerScoresForNameToDatabase(name) {
   if (!databaseStorageReady) return;
   const scores = scoresForPlayer(name);
   lanes.forEach((lane) => {
     savePlayerScoreToDatabase(name, lane.key, scores[lane.key]);
+  });
+}
+
+function saveKangsanPlayerScoresForNameToDatabase(name) {
+  if (!databaseStorageReady) return;
+  const scores = kangsanScoresForPlayer(name);
+  lanes.forEach((lane) => {
+    saveKangsanPlayerScoreToDatabase(name, lane.key, scores[lane.key]);
   });
 }
 
@@ -513,11 +556,25 @@ function resetSessionRecordsInDatabase() {
   });
 }
 
-function scoresForPlayer(name) {
-  if (!playerSkillScores[name]) {
-    playerSkillScores[name] = defaultPlayerScores(name);
+function scoreMapForContext(contextKey = "settings") {
+  return contextKey === "kangsan" ? kangsanPlayerSkillScores : playerSkillScores;
+}
+
+function scoresForPlayerInContext(name, contextKey = "settings") {
+  const scoreMap = scoreMapForContext(contextKey);
+  if (!scoreMap[name]) {
+    scoreMap[name] =
+      contextKey === "kangsan" ? defaultKangsanPlayerScores() : defaultPlayerScores(name);
   }
-  return playerSkillScores[name];
+  return scoreMap[name];
+}
+
+function scoresForPlayer(name) {
+  return scoresForPlayerInContext(name, "settings");
+}
+
+function kangsanScoresForPlayer(name) {
+  return scoresForPlayerInContext(name, "kangsan");
 }
 
 function escapeHtml(value) {
@@ -561,6 +618,7 @@ function handlePlayerInputChange() {
   renderPlayerPool();
   renderBalanceParticipantPool();
   renderBalanceScores();
+  renderKangsanScores();
   renderBalanceControls();
   if (!assignments) renderEmptyBoard();
 }
@@ -624,6 +682,18 @@ function setSettingsStatus(message) {
   if (settingsStatusLabel) settingsStatusLabel.textContent = message;
 }
 
+function setKangsanStatus(message) {
+  if (kangsanStatusLabel) kangsanStatusLabel.textContent = message;
+}
+
+function setScoreStatus(contextKey, message) {
+  if (contextKey === "kangsan") {
+    setKangsanStatus(message);
+    return;
+  }
+  setSettingsStatus(message);
+}
+
 function renderSettingsPlayers() {
   if (!settingsPlayerList) return;
 
@@ -653,6 +723,7 @@ function rerenderPlayerViews() {
   renderBalanceParticipantPool();
   renderSettingsPlayers();
   renderBalanceScores();
+  renderKangsanScores();
   renderBalanceControls();
   if (!assignments) renderEmptyBoard();
 }
@@ -665,8 +736,10 @@ function addPlayerNameToPool(rawName, shouldAddToDraft = false) {
   if (isNewPlayer) {
     playerPoolNames = [...playerPoolNames, name];
     scoresForPlayer(name);
+    kangsanScoresForPlayer(name);
     savePlayerPoolNames();
     savePlayerScoresForNameToDatabase(name);
+    saveKangsanPlayerScoresForNameToDatabase(name);
   }
 
   if (shouldAddToDraft && addPlayerToInput(name)) {
@@ -722,6 +795,9 @@ function renamePlayerName(oldName, rawNewName) {
 
   playerSkillScores[newName] = playerSkillScores[oldName] || defaultPlayerScores(newName);
   delete playerSkillScores[oldName];
+  kangsanPlayerSkillScores[newName] =
+    kangsanPlayerSkillScores[oldName] || defaultKangsanPlayerScores();
+  delete kangsanPlayerSkillScores[oldName];
   renameBalancePlayerReferences(oldName, newName);
   savePlayerPoolNames(false);
   renamePlayerInDatabase(oldName, newName);
@@ -737,6 +813,7 @@ function deletePlayerName(name) {
   selectedPlayerNames.delete(name);
   removePlayerFromInputs(name);
   delete playerSkillScores[name];
+  delete kangsanPlayerSkillScores[name];
 
   Object.keys(presetPlayersBySlot).forEach((key) => {
     if (presetPlayersBySlot[key] === name) presetPlayersBySlot[key] = "";
@@ -755,31 +832,57 @@ function deletePlayerName(name) {
   setSettingsStatus(`${name}을 플레이어 풀에서 삭제했습니다.`);
 }
 
-function averageScore(name) {
-  const scores = scoresForPlayer(name);
+function scoreGridForContext(contextKey = "settings") {
+  return contextKey === "kangsan" ? kangsanScoreGrid : balanceScoreGrid;
+}
+
+function scoreSortForContext(contextKey = "settings") {
+  return contextKey === "kangsan" ? kangsanScoreSort : balanceScoreSort;
+}
+
+function setScoreSortForContext(contextKey, sortState) {
+  if (contextKey === "kangsan") {
+    kangsanScoreSort = sortState;
+    return;
+  }
+  balanceScoreSort = sortState;
+}
+
+function averageScoreForContext(name, contextKey = "settings") {
+  const scores = scoresForPlayerInContext(name, contextKey);
   const total = lanes.reduce((sum, lane) => sum + clampScore(scores[lane.key], 50), 0);
   return Math.round(total / lanes.length);
+}
+
+function averageScore(name) {
+  return averageScoreForContext(name, "settings");
+}
+
+function laneScoreForContext(player, laneKey, contextKey = "settings") {
+  return clampScore(scoresForPlayerInContext(player, contextKey)[laneKey], 50);
 }
 
 function defaultBalanceScoreSortDirection(key) {
   return key === "name" ? "asc" : "desc";
 }
 
-function balanceScoreSortButton(key, label) {
-  const isActive = balanceScoreSort.key === key;
+function balanceScoreSortButton(key, label, contextKey = "settings") {
+  const scoreSort = scoreSortForContext(contextKey);
+  const isActive = scoreSort.key === key;
   const nextDirection = isActive
-    ? balanceScoreSort.direction === "asc"
+    ? scoreSort.direction === "asc"
       ? "내림차순"
       : "오름차순"
     : defaultBalanceScoreSortDirection(key) === "asc"
       ? "오름차순"
       : "내림차순";
-  const indicator = isActive ? (balanceScoreSort.direction === "asc" ? "오름차순" : "내림차순") : "정렬";
+  const indicator = isActive ? (scoreSort.direction === "asc" ? "오름차순" : "내림차순") : "정렬";
   return `
     <button
       class="balance-score-sort-button ${isActive ? "is-active" : ""}"
       type="button"
       data-score-sort="${key}"
+      data-score-context="${contextKey}"
       aria-pressed="${isActive}"
       aria-label="${label} ${nextDirection} 정렬"
     >
@@ -789,9 +892,9 @@ function balanceScoreSortButton(key, label) {
   `;
 }
 
-function sortedBalanceScoreNames() {
+function sortedBalanceScoreNames(contextKey = "settings") {
   const names = orderedPlayerPoolNames();
-  const { key, direction } = balanceScoreSort;
+  const { key, direction } = scoreSortForContext(contextKey);
   const directionMultiplier = direction === "asc" ? 1 : -1;
 
   if (key === "name") {
@@ -799,43 +902,47 @@ function sortedBalanceScoreNames() {
   }
 
   return names.sort((firstName, secondName) => {
-    const firstValue = key === "average" ? averageScore(firstName) : laneScore(firstName, key);
-    const secondValue = key === "average" ? averageScore(secondName) : laneScore(secondName, key);
+    const firstValue =
+      key === "average" ? averageScoreForContext(firstName, contextKey) : laneScoreForContext(firstName, key, contextKey);
+    const secondValue =
+      key === "average" ? averageScoreForContext(secondName, contextKey) : laneScoreForContext(secondName, key, contextKey);
     const valueDiff = (firstValue - secondValue) * directionMultiplier;
     return valueDiff || koreanNameSorter.compare(firstName, secondName);
   });
 }
 
-function toggleBalanceScoreSort(key) {
+function toggleBalanceScoreSort(key, contextKey = "settings") {
   if (!key) return;
+  const currentSort = scoreSortForContext(contextKey);
 
-  balanceScoreSort = {
+  setScoreSortForContext(contextKey, {
     key,
     direction:
-      balanceScoreSort.key === key
-        ? balanceScoreSort.direction === "asc"
+      currentSort.key === key
+        ? currentSort.direction === "asc"
           ? "desc"
           : "asc"
         : defaultBalanceScoreSortDirection(key)
-  };
-  renderBalanceScores();
+  });
+  renderScoreGrid(contextKey);
 }
 
-function renderBalanceScores() {
-  if (!balanceScoreGrid) return;
+function renderScoreGrid(contextKey = "settings") {
+  const scoreGrid = scoreGridForContext(contextKey);
+  if (!scoreGrid) return;
 
-  balanceScoreGrid.innerHTML = `
+  scoreGrid.innerHTML = `
     <div class="balance-score-head" role="row">
-      ${balanceScoreSortButton("name", "플레이어")}
-      ${lanes.map((lane) => balanceScoreSortButton(lane.key, lane.label)).join("")}
-      ${balanceScoreSortButton("average", "평균")}
+      ${balanceScoreSortButton("name", "플레이어", contextKey)}
+      ${lanes.map((lane) => balanceScoreSortButton(lane.key, lane.label, contextKey)).join("")}
+      ${balanceScoreSortButton("average", "평균", contextKey)}
       <span>수정</span>
     </div>
-    ${sortedBalanceScoreNames()
+    ${sortedBalanceScoreNames(contextKey)
       .map((name) => {
-        const scores = scoresForPlayer(name);
+        const scores = scoresForPlayerInContext(name, contextKey);
         return `
-          <article class="balance-player-row" data-player-name="${escapeHtml(name)}">
+          <article class="balance-player-row" data-player-name="${escapeHtml(name)}" data-score-context="${contextKey}">
             <div class="balance-player-name">${escapeHtml(name)}</div>
             ${lanes
               .map(
@@ -852,6 +959,7 @@ function renderBalanceScores() {
                     value="${clampScore(scores[lane.key], 50)}"
                     data-player-name="${escapeHtml(name)}"
                     data-lane="${lane.key}"
+                    data-score-context="${contextKey}"
                     aria-label="${escapeHtml(name)} ${lane.label} 영향력"
                     disabled
                   />
@@ -860,9 +968,9 @@ function renderBalanceScores() {
               )
               .join("")}
             <div class="balance-average" aria-label="${escapeHtml(name)} 평균 영향력">
-              <span class="balance-average-value">${averageScore(name)}</span>
+              <span class="balance-average-value">${averageScoreForContext(name, contextKey)}</span>
             </div>
-            <button class="mini-button balance-score-edit-button" type="button" data-score-action="edit" data-player-name="${escapeHtml(name)}">
+            <button class="mini-button balance-score-edit-button" type="button" data-score-action="edit" data-score-context="${contextKey}" data-player-name="${escapeHtml(name)}">
               수정
             </button>
           </article>
@@ -872,12 +980,21 @@ function renderBalanceScores() {
   `;
 }
 
-function updateBalanceAverage(name) {
-  const row = [...(balanceScoreGrid?.querySelectorAll(".balance-player-row") || [])].find(
+function renderBalanceScores() {
+  renderScoreGrid("settings");
+}
+
+function renderKangsanScores() {
+  renderScoreGrid("kangsan");
+}
+
+function updateBalanceAverage(name, contextKey = "settings") {
+  const scoreGrid = scoreGridForContext(contextKey);
+  const row = [...(scoreGrid?.querySelectorAll(".balance-player-row") || [])].find(
     (item) => item.dataset.playerName === name
   );
   const average = row?.querySelector(".balance-average-value");
-  if (average) average.textContent = averageScore(name);
+  if (average) average.textContent = averageScoreForContext(name, contextKey);
 }
 
 function rowAverageFromInputs(row) {
@@ -910,28 +1027,35 @@ function saveBalanceScoreRow(row) {
   if (!row) return;
   const name = row.dataset.playerName;
   if (!name) return;
+  const contextKey = row.dataset.scoreContext || "settings";
 
   row.querySelectorAll(".balance-score-input").forEach((input) => {
     const laneKey = input.dataset.lane;
     if (!laneKey) return;
-    const score = clampScore(input.value, scoresForPlayer(name)[laneKey]);
+    const scores = scoresForPlayerInContext(name, contextKey);
+    const score = clampScore(input.value, scores[laneKey]);
     input.value = String(score);
-    scoresForPlayer(name)[laneKey] = score;
-    savePlayerScoreToDatabase(name, laneKey, score);
+    scores[laneKey] = score;
+    if (contextKey === "kangsan") {
+      saveKangsanPlayerScoreToDatabase(name, laneKey, score);
+    } else {
+      savePlayerScoreToDatabase(name, laneKey, score);
+    }
   });
 
-  updateBalanceAverage(name);
+  updateBalanceAverage(name, contextKey);
   setBalanceScoreRowEditing(row, false);
-  setSettingsStatus(
+  setScoreStatus(
+    contextKey,
     databaseStorageReady
       ? `${name}의 라인별 영향력을 저장했습니다.`
       : "PostgreSQL 연결이 없어 화면에만 반영됐고 저장되지 않았습니다."
   );
-  if (balanceAssignments) {
+  if (contextKey === "settings" && balanceAssignments) {
     updateBalanceAssignmentScores(balanceAssignments);
     renderBalanceBoard(false);
   }
-  renderBalanceScores();
+  renderScoreGrid(contextKey);
 }
 
 function updateBalanceScore(input) {
@@ -943,9 +1067,10 @@ function settleBalanceScore(input) {
   if (input.disabled) return;
   const name = input.dataset.playerName;
   const laneKey = input.dataset.lane;
+  const contextKey = input.dataset.scoreContext || "settings";
   if (!name || !laneKey) return;
 
-  const currentScore = scoresForPlayer(name)[laneKey];
+  const currentScore = scoresForPlayerInContext(name, contextKey)[laneKey];
   if (input.value === "") {
     input.value = String(clampScore(currentScore, 50));
     return;
@@ -957,18 +1082,19 @@ function settleBalanceScore(input) {
 function handleBalanceScoreAction(button) {
   const row = button.closest(".balance-player-row");
   if (!row) return;
+  const contextKey = row.dataset.scoreContext || button.dataset.scoreContext || "settings";
 
   if (button.dataset.scoreAction === "save") {
     saveBalanceScoreRow(row);
     return;
   }
 
-  balanceScoreGrid.querySelectorAll(".balance-player-row.is-editing").forEach((editingRow) => {
+  scoreGridForContext(contextKey)?.querySelectorAll(".balance-player-row.is-editing").forEach((editingRow) => {
     if (editingRow !== row) setBalanceScoreRowEditing(editingRow, false);
   });
   setBalanceScoreRowEditing(row, true);
   row.querySelector(".balance-score-input")?.focus();
-  setSettingsStatus(`${row.dataset.playerName}의 라인별 영향력을 수정합니다.`);
+  setScoreStatus(contextKey, `${row.dataset.playerName}의 라인별 영향력을 수정합니다.`);
 }
 
 function setBalanceStatus(message) {
@@ -1880,6 +2006,9 @@ function switchPage(pageKey, shouldScroll = true) {
     renderSettingsPlayers();
     renderBalanceScores();
     document.querySelector("#settings")?.classList.add("is-visible");
+  } else if (pageKey === "kangsan") {
+    renderKangsanScores();
+    document.querySelector("#kangsan")?.classList.add("is-visible");
   } else if (pageKey === "balance") {
     renderBalanceParticipantPool();
     renderBalanceControls();
@@ -1904,6 +2033,7 @@ function fillPlayers(names) {
   renderPlayerPool();
   renderBalanceParticipantPool();
   renderBalanceScores();
+  renderKangsanScores();
   renderBalanceControls();
   if (!assignments) renderEmptyBoard();
 }
@@ -3174,6 +3304,7 @@ async function initializeApp() {
   renderHistory();
   renderSettingsPlayers();
   renderBalanceScores();
+  renderKangsanScores();
   renderBalanceControls();
   renderBalanceBoard(false);
   updatePlaySessionButton();
@@ -3239,11 +3370,37 @@ addListener(balanceScoreGrid, "focusout", (event) => {
 addListener(balanceScoreGrid, "click", (event) => {
   const sortButton = event.target.closest("[data-score-sort]");
   if (sortButton) {
-    if (balanceScoreGrid.querySelector(".balance-player-row.is-editing")) {
-      setSettingsStatus("라인별 영향력을 저장한 뒤 정렬하세요.");
+    const contextKey = sortButton.dataset.scoreContext || "settings";
+    const scoreGrid = scoreGridForContext(contextKey);
+    if (scoreGrid?.querySelector(".balance-player-row.is-editing")) {
+      setScoreStatus(contextKey, "라인별 영향력을 저장한 뒤 정렬하세요.");
       return;
     }
-    toggleBalanceScoreSort(sortButton.dataset.scoreSort);
+    toggleBalanceScoreSort(sortButton.dataset.scoreSort, contextKey);
+    return;
+  }
+
+  const button = event.target.closest(".balance-score-edit-button");
+  if (button) handleBalanceScoreAction(button);
+});
+addListener(kangsanScoreGrid, "input", (event) => {
+  const input = event.target.closest(".balance-score-input");
+  if (input) updateBalanceScore(input);
+});
+addListener(kangsanScoreGrid, "focusout", (event) => {
+  const input = event.target.closest(".balance-score-input");
+  if (input) settleBalanceScore(input);
+});
+addListener(kangsanScoreGrid, "click", (event) => {
+  const sortButton = event.target.closest("[data-score-sort]");
+  if (sortButton) {
+    const contextKey = sortButton.dataset.scoreContext || "kangsan";
+    const scoreGrid = scoreGridForContext(contextKey);
+    if (scoreGrid?.querySelector(".balance-player-row.is-editing")) {
+      setScoreStatus(contextKey, "라인별 영향력을 저장한 뒤 정렬하세요.");
+      return;
+    }
+    toggleBalanceScoreSort(sortButton.dataset.scoreSort, contextKey);
     return;
   }
 
