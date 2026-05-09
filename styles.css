@@ -2406,6 +2406,15 @@ h3 {
   font-weight: 850;
 }
 
+.balance-selected-roster.is-drag-target {
+  background:
+    linear-gradient(145deg, rgba(200, 231, 255, 0.62), rgba(255, 208, 216, 0.5)),
+    rgba(255, 255, 255, 0.68);
+  box-shadow:
+    inset 0 2px 8px rgba(86, 110, 139, 0.12),
+    0 0 0 4px rgba(200, 231, 255, 0.28);
+}
+
 .balance-roster-card {
   display: grid;
   min-width: 0;
@@ -2602,7 +2611,7 @@ h3 {
     0 12px 24px rgba(86, 110, 139, 0.09);
 }
 
-.balance-card.is-fixed-preview {
+.balance-card.is-placed-preview {
   background:
     linear-gradient(145deg, rgba(214, 240, 255, 0.88), rgba(255, 232, 237, 0.74)),
     rgba(255, 255, 255, 0.82);
@@ -2611,13 +2620,18 @@ h3 {
     0 14px 28px rgba(86, 110, 139, 0.12);
 }
 
-.balance-card.is-fixed-preview .balance-card-score {
+.balance-card.is-placed-preview .balance-card-score {
   color: #31536d;
   background: linear-gradient(145deg, rgba(200, 231, 255, 0.96), rgba(255, 208, 216, 0.74));
 }
 
-.balance-card.is-fixed-preview .balance-card-hint {
+.balance-card.is-placed-preview .balance-card-hint {
   color: #526b80;
+}
+
+.balance-card.is-arriving-target {
+  opacity: 0;
+  transform: translateY(4px) scale(0.985);
 }
 
 .balance-card.is-draggable:hover {
@@ -2667,6 +2681,20 @@ h3 {
   transition: none;
   transform-origin: top left;
   will-change: transform;
+}
+
+.balance-flight-card {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 170;
+  margin: 0;
+  pointer-events: none;
+  transform-origin: top left;
+  will-change: transform, opacity;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.98),
+    0 24px 52px rgba(86, 110, 139, 0.22);
 }
 
 .balance-drag-ghost.balance-roster-ghost {
