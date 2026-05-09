@@ -133,6 +133,10 @@ function isLaneKey(value) {
   return lanes.some((lane) => lane.key === value);
 }
 
+function isTeamKey(value) {
+  return value === "blue" || value === "red";
+}
+
 function pairKey(firstName, secondName) {
   return [firstName, secondName].sort((first, second) => first.localeCompare(second, "ko-KR")).join("::");
 }
@@ -180,7 +184,8 @@ function sanitizeFixedPositionRules(rules = []) {
     .map((rule) => {
       const player = normalizeName(rule?.player || "");
       const lane = isLaneKey(rule?.lane) ? rule.lane : "";
-      return { player, lane };
+      const team = isTeamKey(rule?.team) ? rule.team : "";
+      return { player, lane, team };
     })
     .filter((rule) => {
       if (!rule.player || !rule.lane || seenPlayers.has(rule.player)) return false;

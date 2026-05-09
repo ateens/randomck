@@ -66,7 +66,7 @@ const defaultPlayerSkillProfiles = {
   예지: { top: 58, jungle: 60, mid: 76, bot: 79, support: 81 }
 };
 let playerPoolNames = loadPlayerPoolNames();
-let selectedPlayerNames = new Set(sortPlayerNames(playerPoolNames).slice(0, 10));
+let selectedPlayerNames = new Set();
 let playerSkillScores = loadPlayerSkillScores();
 let kangsanPlayerSkillScores = loadKangsanPlayerSkillScores();
 let databaseStorageReady = false;
@@ -149,9 +149,11 @@ const balanceSeparateList = document.querySelector("#balanceSeparateList");
 const balanceFixedList = document.querySelector("#balanceFixedList");
 const balanceExcludedList = document.querySelector("#balanceExcludedList");
 const balanceStartButton = document.querySelector("#balanceStartButton");
+const kangsanBalanceStartButton = document.querySelector("#kangsanBalanceStartButton");
 const balanceClearButton = document.querySelector("#balanceClearButton");
 const balanceSummary = document.querySelector("#balanceSummary");
 const balanceBoard = document.querySelector("#balanceBoard");
+const balanceSelectedRoster = document.querySelector("#balanceSelectedRoster");
 
 function championImage(id) {
   return `${CHAMPION_ASSET_BASE}/${id}.png`;
@@ -356,7 +358,8 @@ function sanitizeFixedPositionRules(rules = []) {
     .map((rule) => {
       const player = normalizeName(rule?.player || "");
       const lane = getLane(rule?.lane)?.key || "";
-      return { player, lane };
+      const team = teams.some((item) => item.key === rule?.team) ? rule.team : "";
+      return { player, lane, team };
     })
     .filter((rule) => {
       if (!rule.player || !rule.lane || seenPlayers.has(rule.player)) return false;
@@ -440,7 +443,7 @@ async function loadDatabaseState() {
     kangsanPlayerSkillScores = sanitizeSkillScoreMap(data.kangsanPlayerSkillScores || {}, "kangsan");
     balanceRules = sanitizeBalanceRules(data.balanceRules || {});
     sessionRecords = Array.isArray(data.sessionRecords) ? data.sessionRecords : [];
-    selectedPlayerNames = new Set(sortPlayerNames(playerPoolNames).slice(0, 10));
+    selectedPlayerNames = new Set();
   } catch {
     databaseStorageReady = false;
     databaseStatusMessage = "PostgreSQL API에 연결할 수 없어 변경사항이 저장되지 않습니다.";
@@ -672,6 +675,44 @@ function renderBalanceParticipantPool() {
       return `
         <button class="balance-participant-card ${isSelected ? "is-selected" : ""}" type="button" data-player-name="${escapeHtml(name)}" aria-pressed="${isSelected}">
           <span>${escapeHtml(name)}</span>
+        </button>
+      `;
+    })
+    .join("");
+}
+
+function renderBalanceSelectedRoster() {
+  if (!balanceSelectedRoster) return;
+
+  const players = activeBalancePlayers();
+  if (players.length === 0) {
+    balanceSelectedRoster.innerHTML = `
+      <p class="balance-selected-empty">참여 플레이어를 선택하면 여기에 표시됩니다.</p>
+    `;
+    return;
+  }
+
+  const fixedPlayers = new Set(visibleBalanceRulesForPlayers(players).fixed.map((rule) => rule.player));
+  const movablePlayers = players.filter((name) => !fixedPlayers.has(name));
+
+  if (movablePlayers.length === 0) {
+    balanceSelectedRoster.innerHTML = `
+      <p class="balance-selected-empty">고정된 플레이어는 보드에 표시됩니다.</p>
+    `;
+    return;
+  }
+
+  balanceSelectedRoster.innerHTML = movablePlayers
+    .map((name) => {
+      return `
+        <button
+          class="balance-roster-card"
+          type="button"
+          data-player-name="${escapeHtml(name)}"
+          aria-label="${escapeHtml(name)} 포지션 고정 드래그"
+        >
+          <strong>${escapeHtml(name)}</strong>
+          <span>드래그해서 포지션 고정</span>
         </button>
       `;
     })
@@ -1051,7 +1092,7 @@ function saveBalanceScoreRow(row) {
       ? `${name}의 라인별 영향력을 저장했습니다.`
       : "PostgreSQL 연결이 없어 화면에만 반영됐고 저장되지 않았습니다."
   );
-  if (contextKey === "settings" && balanceAssignments) {
+  if (balanceAssignments?.meta?.scoreContext === contextKey) {
     updateBalanceAssignmentScores(balanceAssignments);
     renderBalanceBoard(false);
   }
@@ -1208,7 +1249,10 @@ function balanceRuleListMarkup(rules, type) {
     .map((rule, index) => {
       const label = (() => {
         if (type === "together") return rule.members.map(escapeHtml).join(" · ");
-        if (type === "fixed") return `${escapeHtml(rule.player)} · ${getLane(rule.lane).label}`;
+        if (type === "fixed") {
+          const teamLabel = teams.find((team) => team.key === rule.team)?.label;
+          return `${escapeHtml(rule.player)} · ${teamLabel ? `${teamLabel} ` : ""}${getLane(rule.lane).label}`;
+        }
         if (type === "excluded") return `${escapeHtml(rule.player)} · ${getLane(rule.lane).label} 제외`;
         return `${escapeHtml(rule.first)} · ${escapeHtml(rule.second)}`;
       })();
@@ -1271,6 +1315,7 @@ function renderBalanceControls() {
   if (balanceSeparateList) balanceSeparateList.innerHTML = balanceRuleListMarkup(rules.separate, "separate");
   if (balanceFixedList) balanceFixedList.innerHTML = balanceRuleListMarkup(rules.fixed, "fixed");
   if (balanceExcludedList) balanceExcludedList.innerHTML = balanceRuleListMarkup(rules.excluded, "excluded");
+  renderBalanceSelectedRoster();
   renderBalanceCustomSelects();
 
   updateBalanceStartButton();
@@ -1278,8 +1323,9 @@ function renderBalanceControls() {
 }
 
 function updateBalanceStartButton() {
-  if (!balanceStartButton) return;
-  balanceStartButton.disabled = activeBalancePlayers().length !== 10;
+  const shouldDisable = activeBalancePlayers().length !== 10;
+  if (balanceStartButton) balanceStartButton.disabled = shouldDisable;
+  if (kangsanBalanceStartButton) kangsanBalanceStartButton.disabled = shouldDisable;
 }
 
 function addBalanceTogetherRule() {
@@ -1364,6 +1410,70 @@ function addBalanceFixedPosition() {
   saveBalanceRules();
   renderBalanceControls();
   setBalanceStatus(`${player}의 포지션을 ${getLane(lane).label}으로 고정했습니다.`);
+}
+
+function canFixBalancePlayerToLane(player, lane, team = "") {
+  const cleanPlayer = normalizeName(player || "");
+  const laneInfo = getLane(lane);
+  const teamInfo = teams.find((item) => item.key === team);
+  const activePlayers = activeBalancePlayers();
+
+  if (!cleanPlayer || !laneInfo || !activePlayers.includes(cleanPlayer)) {
+    return { ok: false, message: "참여 플레이어를 라인 위로 드래그하세요." };
+  }
+
+  if (balanceRules.excluded.some((rule) => rule.player === cleanPlayer && rule.lane === laneInfo.key)) {
+    return {
+      ok: false,
+      message: `${cleanPlayer}에게 ${laneInfo.label} 제외 조건이 이미 있습니다.`
+    };
+  }
+
+  const fixedForLane = visibleBalanceRulesForPlayers(activePlayers).fixed.filter(
+    (rule) => rule.lane === laneInfo.key && rule.player !== cleanPlayer
+  );
+  if (fixedForLane.length >= 2) {
+    return {
+      ok: false,
+      message: `${laneInfo.label}에는 최대 2명까지만 고정할 수 있습니다.`
+    };
+  }
+
+  if (
+    teamInfo &&
+    visibleBalanceRulesForPlayers(activePlayers).fixed.some(
+      (rule) => rule.lane === laneInfo.key && rule.team === teamInfo.key && rule.player !== cleanPlayer
+    )
+  ) {
+    return {
+      ok: false,
+      message: `${teamInfo.label} ${laneInfo.label}에는 이미 고정된 플레이어가 있습니다.`
+    };
+  }
+
+  return { ok: true, message: "" };
+}
+
+function applyBalanceRosterDrop(player, lane, team = "") {
+  const result = canFixBalancePlayerToLane(player, lane, team);
+  if (!result.ok) {
+    setBalanceStatus(result.message);
+    return false;
+  }
+
+  const laneInfo = getLane(lane);
+  const teamKey = teams.some((item) => item.key === team) ? team : "";
+  const cleanPlayer = normalizeName(player);
+  balanceRules.fixed = [
+    ...balanceRules.fixed.filter((rule) => rule.player !== cleanPlayer),
+    { player: cleanPlayer, lane: laneInfo.key, team: teamKey }
+  ];
+  balanceAssignments = null;
+  saveBalanceRules();
+  renderBalanceControls();
+  renderBalanceBoard(false);
+  setBalanceStatus(`${cleanPlayer}의 포지션을 ${laneInfo.label}으로 고정했습니다.`);
+  return true;
 }
 
 function addBalanceExcludedPosition() {
@@ -1464,8 +1574,8 @@ function deleteBalancePlayerReferences(name) {
   saveBalanceRules();
 }
 
-function laneScore(player, laneKey) {
-  return clampScore(scoresForPlayer(player)[laneKey], 50);
+function laneScore(player, laneKey, contextKey = "settings") {
+  return laneScoreForContext(player, laneKey, contextKey);
 }
 
 function makeDisjointSet(players) {
@@ -1560,7 +1670,7 @@ function buildBalanceConstraintState(players) {
   };
 }
 
-function buildBalanceLaneGroups(players, constraintState) {
+function buildBalanceLaneGroups(players, constraintState, contextKey = "settings") {
   const laneGroups = Object.fromEntries(lanes.map((lane) => [lane.key, [...constraintState.fixedByLane.get(lane.key)]]));
   const remainingPlayers = shuffle(players.filter((player) => !constraintState.fixedByPlayer.has(player)));
   const componentLaneMap = new Map();
@@ -1585,7 +1695,9 @@ function buildBalanceLaneGroups(players, constraintState) {
       )
       .map((lane) => ({
         lane,
-        weight: Math.max(4, laneScore(player, lane.key) + 8) ** 2 * (0.82 + Math.random() * 0.36)
+        weight:
+          Math.max(4, laneScore(player, lane.key, contextKey) + 8) ** 2 *
+          (0.82 + Math.random() * 0.36)
       }));
 
     if (openLaneOptions.length === 0) return null;
@@ -1606,7 +1718,7 @@ function buildBalanceLaneGroups(players, constraintState) {
   return laneGroups;
 }
 
-function scoreBalanceSideAssignment(laneGroups, mask, constraintState) {
+function scoreBalanceSideAssignment(laneGroups, mask, constraintState, contextKey = "settings") {
   const result = { blue: [], red: [] };
   const teamByPlayer = new Map();
   let blueTotal = 0;
@@ -1619,8 +1731,8 @@ function scoreBalanceSideAssignment(laneGroups, mask, constraintState) {
     const shouldSwap = Boolean(mask & (1 << index));
     const bluePlayer = shouldSwap ? lanePlayers[1] : lanePlayers[0];
     const redPlayer = shouldSwap ? lanePlayers[0] : lanePlayers[1];
-    const blueScore = laneScore(bluePlayer, lane.key);
-    const redScore = laneScore(redPlayer, lane.key);
+    const blueScore = laneScore(bluePlayer, lane.key, contextKey);
+    const redScore = laneScore(redPlayer, lane.key, contextKey);
 
     result.blue.push({ lane: lane.key, player: bluePlayer, score: blueScore });
     result.red.push({ lane: lane.key, player: redPlayer, score: redScore });
@@ -1642,6 +1754,11 @@ function scoreBalanceSideAssignment(laneGroups, mask, constraintState) {
   );
   if (hasSeparateViolation) return null;
 
+  const hasFixedTeamViolation = constraintState.rules.fixed.some(
+    (rule) => rule.team && teamByPlayer.get(rule.player) !== rule.team
+  );
+  if (hasFixedTeamViolation) return null;
+
   const diff = Math.abs(blueTotal - redTotal);
   const objective = diff * 22 + laneDiffTotal * 1.45 + (1000 - totalFit) * 1.05;
 
@@ -1651,13 +1768,15 @@ function scoreBalanceSideAssignment(laneGroups, mask, constraintState) {
     diff,
     laneDiff: laneDiffTotal,
     totalFit,
-    objective
+    objective,
+    scoreContext: contextKey
   };
   return result;
 }
 
 function updateBalanceAssignmentScores(source) {
   if (!source) return source;
+  const contextKey = source.meta?.scoreContext || "settings";
   let blueTotal = 0;
   let redTotal = 0;
   let laneDiffTotal = 0;
@@ -1667,8 +1786,8 @@ function updateBalanceAssignmentScores(source) {
     const blueRow = assignmentFrom(source, "blue", lane.key);
     const redRow = assignmentFrom(source, "red", lane.key);
     if (!blueRow || !redRow) return;
-    blueRow.score = laneScore(blueRow.player, lane.key);
-    redRow.score = laneScore(redRow.player, lane.key);
+    blueRow.score = laneScore(blueRow.player, lane.key, contextKey);
+    redRow.score = laneScore(redRow.player, lane.key, contextKey);
     blueTotal += blueRow.score;
     redTotal += redRow.score;
     laneDiffTotal += Math.abs(blueRow.score - redRow.score);
@@ -1681,15 +1800,16 @@ function updateBalanceAssignmentScores(source) {
     diff: Math.abs(blueTotal - redTotal),
     laneDiff: laneDiffTotal,
     totalFit,
-    objective: source.meta?.objective || 0
+    objective: source.meta?.objective || 0,
+    scoreContext: contextKey
   };
   return source;
 }
 
-function createBalancedAssignments() {
+function createBalancedAssignments(contextKey = "settings") {
   const players = activeBalancePlayers();
   if (players.length !== 10) {
-    throw new Error("랜덤 탭의 참가자 명단을 10명으로 맞춘 뒤 시작하세요.");
+    throw new Error("참여 플레이어를 10명으로 맞춘 뒤 시작하세요.");
   }
 
   const constraintState = buildBalanceConstraintState(players);
@@ -1697,11 +1817,11 @@ function createBalancedAssignments() {
   const iterationCount = 14000;
 
   for (let index = 0; index < iterationCount; index += 1) {
-    const laneGroups = buildBalanceLaneGroups(players, constraintState);
+    const laneGroups = buildBalanceLaneGroups(players, constraintState, contextKey);
     if (!laneGroups) continue;
 
     for (let mask = 0; mask < 32; mask += 1) {
-      const candidate = scoreBalanceSideAssignment(laneGroups, mask, constraintState);
+      const candidate = scoreBalanceSideAssignment(laneGroups, mask, constraintState, contextKey);
       if (!candidate) continue;
       if (!bestAssignment || candidate.meta.objective < bestAssignment.meta.objective) {
         bestAssignment = candidate;
@@ -1732,14 +1852,45 @@ function renderBalanceSummary() {
   `;
 }
 
+function fixedPreviewAssignments() {
+  const preview = { blue: [], red: [] };
+  const fixedRules = visibleBalanceRulesForPlayers(activeBalancePlayers()).fixed;
+
+  lanes.forEach((lane) => {
+    const usedTeams = new Set();
+    fixedRules
+      .filter((rule) => rule.lane === lane.key)
+      .forEach((rule) => {
+        const preferredTeam = teams.some((team) => team.key === rule.team) ? rule.team : "";
+        const targetTeam =
+          preferredTeam && !usedTeams.has(preferredTeam)
+            ? preferredTeam
+            : teams.find((team) => !usedTeams.has(team.key))?.key;
+        if (!targetTeam) return;
+
+        usedTeams.add(targetTeam);
+        preview[targetTeam].push({
+          lane: lane.key,
+          player: rule.player,
+          score: null,
+          fixedPreview: true
+        });
+      });
+  });
+
+  return preview;
+}
+
 function balanceCardMarkup(team, lane, row, animated, index) {
-  const scoreText = row ? `${row.score}점` : "대기";
+  const scoreText = row ? (row.fixedPreview ? "고정" : `${row.score}점`) : "대기";
   const playerText = row ? row.player : "배정 전";
   const delay = animated ? `style="animation-delay: ${index * 70}ms"` : "";
   const cardClasses = [
     "balance-card",
     team.key,
-    row ? "is-draggable" : "",
+    row && !row.fixedPreview ? "is-draggable" : "",
+    row?.fixedPreview ? "is-fixed-preview" : "",
+    row ? "" : "is-drop-zone",
     animated ? "is-dealing" : "",
     pendingBalanceSwapSlots.has(slotKey(team.key, lane.key)) ? "is-swapping" : ""
   ]
@@ -1751,7 +1902,7 @@ function balanceCardMarkup(team, lane, row, animated, index) {
       <span class="balance-card-main">
         <strong>${escapeHtml(playerText)}</strong>
       </span>
-      ${row ? `<small class="balance-card-hint">드래그해서 위치 변경</small>` : ""}
+      <small class="balance-card-hint">${row ? (row.fixedPreview ? "포지션 고정" : "드래그해서 위치 변경") : "참여자 드롭"}</small>
     </article>
   `;
 }
@@ -1759,6 +1910,7 @@ function balanceCardMarkup(team, lane, row, animated, index) {
 function renderBalanceBoard(animated = false) {
   if (!balanceBoard) return;
   renderBalanceSummary();
+  const displayAssignments = balanceAssignments || fixedPreviewAssignments();
 
   const renderTeam = (team) => {
     const total = balanceAssignments?.meta?.[`${team.key}Total`];
@@ -1771,7 +1923,7 @@ function renderBalanceBoard(animated = false) {
       <div class="role-list">
         ${lanes
           .map((lane, index) =>
-            balanceCardMarkup(team, lane, assignmentFrom(balanceAssignments, team.key, lane.key), animated, index)
+            balanceCardMarkup(team, lane, assignmentFrom(displayAssignments, team.key, lane.key), animated, index)
           )
           .join("")}
       </div>
@@ -1835,15 +1987,24 @@ function updateBalanceDragGhost(event) {
 
 function updateBalanceDragTarget(event) {
   if (!balanceDragState) return;
-  const targetCard = document
-    .elementFromPoint(event.clientX, event.clientY)
-    ?.closest(".balance-card.is-draggable");
-  const isValidTarget = Boolean(
-    targetCard &&
-      targetCard !== balanceDragState.sourceCard &&
-      balanceBoard.contains(targetCard) &&
-      assignmentFrom(balanceAssignments, targetCard.dataset.team, targetCard.dataset.lane)
-  );
+  const targetCard = document.elementFromPoint(event.clientX, event.clientY)?.closest(".balance-card");
+  const isRosterDrop = balanceDragState.type === "roster";
+  const isValidTarget = isRosterDrop
+    ? Boolean(
+        targetCard &&
+          balanceBoard?.contains(targetCard) &&
+          canFixBalancePlayerToLane(
+            balanceDragState.sourcePlayer,
+            targetCard.dataset.lane,
+            targetCard.dataset.team
+          ).ok
+      )
+    : Boolean(
+        targetCard?.classList.contains("is-draggable") &&
+          targetCard !== balanceDragState.sourceCard &&
+          balanceBoard?.contains(targetCard) &&
+          assignmentFrom(balanceAssignments, targetCard.dataset.team, targetCard.dataset.lane)
+      );
   const nextTarget = isValidTarget ? targetCard : null;
 
   if (balanceDragState.targetCard !== nextTarget) {
@@ -1889,7 +2050,7 @@ function finishBalanceDrag(event) {
   document.removeEventListener("pointercancel", cancelBalanceDrag);
 
   updateBalanceDragTarget(event);
-  const { sourceCard, targetCard, ghost, startRect } = balanceDragState;
+  const { sourceCard, targetCard, ghost, startRect, sourcePlayer, type } = balanceDragState;
   const dropTarget = targetCard;
 
   if (dropTarget) {
@@ -1898,10 +2059,19 @@ function finishBalanceDrag(event) {
     ghost.style.transform = `translate3d(${targetRect.left}px, ${targetRect.top}px, 0) scale(0.98)`;
     ghost.style.opacity = "0.9";
     window.setTimeout(() => {
-      const sourceName = assignmentFrom(balanceAssignments, sourceCard.dataset.team, sourceCard.dataset.lane)?.player;
+      const sourceName =
+        type === "roster"
+          ? sourcePlayer
+          : assignmentFrom(balanceAssignments, sourceCard.dataset.team, sourceCard.dataset.lane)?.player;
       const targetName = assignmentFrom(balanceAssignments, dropTarget.dataset.team, dropTarget.dataset.lane)?.player;
+      const targetLane = dropTarget.dataset.lane;
+      const targetTeam = dropTarget.dataset.team;
       clearBalanceDragState();
-      if (sourceName && targetName) swapBalanceCards(sourceCard, dropTarget);
+      if (type === "roster" && sourceName && targetLane) {
+        applyBalanceRosterDrop(sourceName, targetLane, targetTeam);
+      } else if (sourceName && targetName) {
+        swapBalanceCards(sourceCard, dropTarget);
+      }
     }, 210);
     return;
   }
@@ -1928,12 +2098,21 @@ function cancelBalanceDrag() {
 }
 
 function startBalanceDrag(event) {
-  if (event.button !== 0 || !balanceAssignments) return;
-  const sourceCard = event.target.closest(".balance-card.is-draggable");
-  if (!sourceCard || !balanceBoard?.contains(sourceCard)) return;
+  if (event.button !== 0) return;
+  const rosterCard = event.target.closest(".balance-roster-card");
+  const isRosterDrag = Boolean(rosterCard && balanceSelectedRoster?.contains(rosterCard));
+  const sourceCard = isRosterDrag ? rosterCard : event.target.closest(".balance-card.is-draggable");
+  if (!sourceCard) return;
 
-  const sourceRow = assignmentFrom(balanceAssignments, sourceCard.dataset.team, sourceCard.dataset.lane);
-  if (!sourceRow) return;
+  const sourceRow = isRosterDrag
+    ? null
+    : assignmentFrom(balanceAssignments, sourceCard.dataset.team, sourceCard.dataset.lane);
+  const sourcePlayer = isRosterDrag ? sourceCard.dataset.playerName : sourceRow?.player;
+  if (isRosterDrag) {
+    if (!sourcePlayer || !activeBalancePlayers().includes(sourcePlayer)) return;
+  } else if (!balanceAssignments || !balanceBoard?.contains(sourceCard) || !sourceRow) {
+    return;
+  }
 
   event.preventDefault();
   closeBalanceCustomSelects();
@@ -1941,6 +2120,7 @@ function startBalanceDrag(event) {
   const ghost = sourceCard.cloneNode(true);
   ghost.classList.remove("is-swapping", "is-drag-target", "is-drag-source");
   ghost.classList.add("balance-drag-ghost");
+  if (isRosterDrag) ghost.classList.add("balance-roster-ghost");
   ghost.style.width = `${rect.width}px`;
   ghost.style.height = `${rect.height}px`;
   ghost.style.transform = `translate3d(${rect.left}px, ${rect.top}px, 0)`;
@@ -1949,6 +2129,8 @@ function startBalanceDrag(event) {
   sourceCard.classList.add("is-drag-source");
   document.body.classList.add("is-balance-dragging");
   balanceDragState = {
+    type: isRosterDrag ? "roster" : "assignment",
+    sourcePlayer,
     sourceCard,
     targetCard: null,
     ghost,
@@ -1962,19 +2144,21 @@ function startBalanceDrag(event) {
   document.addEventListener("pointercancel", cancelBalanceDrag);
 }
 
-function randomizeBalanceDraft() {
-  if (!balanceStartButton) return;
+function randomizeBalanceDraft(contextKey = "settings") {
+  if (!balanceStartButton && !kangsanBalanceStartButton) return;
 
-  balanceStartButton.disabled = true;
+  if (balanceStartButton) balanceStartButton.disabled = true;
+  if (kangsanBalanceStartButton) kangsanBalanceStartButton.disabled = true;
   document.body.classList.add("is-randomizing");
-  setBalanceStatus("라인별 영향력과 조건을 반영해 조합을 찾고 있습니다.");
+  const sourceLabel = contextKey === "kangsan" ? "강산" : "설정";
+  setBalanceStatus(`${sourceLabel} 영향력과 조건을 반영해 조합을 찾고 있습니다.`);
 
   window.setTimeout(() => {
     try {
-      balanceAssignments = createBalancedAssignments();
+      balanceAssignments = createBalancedAssignments(contextKey);
       renderBalanceBoard(true);
       const { diff } = balanceAssignments.meta;
-      setBalanceStatus(`밸런스 배정 완료. 두 팀 총점 차이는 ${diff}점입니다.`);
+      setBalanceStatus(`${sourceLabel} 밸런스 배정 완료. 두 팀 총점 차이는 ${diff}점입니다.`);
     } catch (error) {
       balanceAssignments = null;
       renderBalanceBoard(false);
@@ -3411,9 +3595,11 @@ addListener(balanceAddTogetherButton, "click", addBalanceTogetherRule);
 addListener(balanceAddSeparateButton, "click", addBalancePairRule);
 addListener(balanceAddFixedButton, "click", addBalanceFixedPosition);
 addListener(balanceAddExcludedButton, "click", addBalanceExcludedPosition);
-addListener(balanceStartButton, "click", randomizeBalanceDraft);
+addListener(balanceStartButton, "click", () => randomizeBalanceDraft("settings"));
+addListener(kangsanBalanceStartButton, "click", () => randomizeBalanceDraft("kangsan"));
 addListener(balanceClearButton, "click", clearBalanceAssignments);
 addListener(balanceBoard, "pointerdown", startBalanceDrag);
+addListener(balanceSelectedRoster, "pointerdown", startBalanceDrag);
 [
   balanceTogetherList,
   balanceSeparateList,
